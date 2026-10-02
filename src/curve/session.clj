@@ -16,11 +16,37 @@
     (reify ThreadFactory
       (newThread [_ r] (doto (Thread. ^Runnable r "curve-worker") (.setDaemon true))))))
 
+(defonce ^java.util.concurrent.ScheduledExecutorService timer
+  (Executors/newSingleThreadScheduledExecutor
+    (reify ThreadFactory
+      (newThread [_ r] (doto (Thread. ^Runnable r "curve-session-timer") (.setDaemon true))))))
+
 (defonce metrics
   {:sessions (AtomicLong.) :messages-in (AtomicLong.) :messages-out (AtomicLong.)
-   :bytes-in (AtomicLong.) :bytes-out (AtomicLong.) :errors (AtomicLong.)})
+   :bytes-in (AtomicLong.) :bytes-out (AtomicLong.) :errors (AtomicLong.)
+   :budget-trips (AtomicLong.) :degraded (AtomicLong.)})
 
 (defn metric [k] (.get ^AtomicLong (metrics k)))
+
+(defn metrics-snapshot
+  "All counters, plus live shared instances (design §8.2 metrics)."
+  []
+  (merge (into (sorted-map) (for [[k v] metrics] [k (.get ^AtomicLong v)]))
+         {:shared-instances (count @@(requiring-resolve 'curve.shared/instances))}))
+
+(def default-budget
+  "Per-session limits (design §8.2). Exceeding bandwidth first degrades
+  (sends are delayed and coalesced); sustained or other excess closes the
+  session, never the process."
+  {:max-nodes 200000
+   :max-bytes-per-sec 2000000
+   :max-turn-ms 2000
+   :max-strikes 3
+   :over-limit-secs 10})
+
+(defn- trip! [s kind detail]
+  (.incrementAndGet ^AtomicLong (metrics :budget-trips))
+  (throw (ex-info (str "curve: session budget exceeded: " (name kind)) {:budget kind :detail detail})))
 
 (declare drain!)
 
@@ -31,12 +57,47 @@
   (when (.compareAndSet ^AtomicBoolean (:scheduled s) false true)
     (.execute ^ExecutorService (:executor s) #(drain! s))))
 
+(defn- bandwidth-ok?
+  "Within this second's byte budget? If not, retry when the second ends."
+  [s]
+  (let [{:keys [max-bytes-per-sec over-limit-secs]} (:budget s)
+        now (System/currentTimeMillis)
+        st (:bw s)
+        {:keys [start bytes over-since]} @st]
+    (when (>= (- now start) 1000) (swap! st assoc :start now :bytes 0))
+    (if (< (:bytes @st) max-bytes-per-sec)
+      (do (swap! st assoc :over-since nil) true)
+      (let [since (or over-since now)]
+        (swap! st assoc :over-since since)
+        (.incrementAndGet ^AtomicLong (metrics :degraded))
+        (when (> (- now since) (* 1000 over-limit-secs))
+          (trip! s :bandwidth {:bytes-per-sec (:bytes @st)}))
+        (let [wait (max 1 (- 1000 (- now (:start @st))))]
+          (.schedule ^java.util.concurrent.ScheduledExecutorService (:timer s)
+                     ^Runnable (fn [] (post! s (fn []))) (long wait) java.util.concurrent.TimeUnit/MILLISECONDS))
+        false))))
+
 (defn- send-pending! [s]
-  (when-let [m (rt/take-message! (:peer s))]
-    (let [bs ((:encode s) m)]
-      (.incrementAndGet ^AtomicLong (metrics :messages-out))
-      (.addAndGet ^AtomicLong (metrics :bytes-out) (codec/byte-count bs))
-      ((:send! s) bs))))
+  (when (bandwidth-ok? s)
+    (when-let [m (rt/take-message! (:peer s))]
+      (let [bs ((:encode s) m)
+            n (codec/byte-count bs)]
+        (.incrementAndGet ^AtomicLong (metrics :messages-out))
+        (.addAndGet ^AtomicLong (metrics :bytes-out) n)
+        (swap! (:bw s) update :bytes + n)
+        (swap! (:stats s) update :bytes-out + n)
+        ((:send! s) bs)))))
+
+(defn- check-budget! [s turn-ms]
+  (let [{:keys [max-nodes max-turn-ms max-strikes]} (:budget s)
+        nodes (:nodes @(:stats s))]
+    (swap! (:stats s) update :turns inc)
+    (when (> nodes max-nodes) (trip! s :nodes {:nodes nodes}))
+    (when (> turn-ms max-turn-ms)
+      (let [strikes (:strikes (swap! (:stats s) update :strikes inc))]
+        (when (>= strikes max-strikes) (trip! s :cpu {:turn-ms turn-ms}))))))
+
+(defn stats "Per-session counters: nodes, bytes-out, turns, strikes." [s] @(:stats s))
 
 (defn close!
   "Tear the session down: unmount (runs every cleanup) and stop."
@@ -53,7 +114,9 @@
         (f)
         (recur)))
     (when @(:open s)
-      (rt/run! (:peer s))
+      (let [t0 (System/nanoTime)]
+        (rt/run! (:peer s))
+        (check-budget! s (/ (- (System/nanoTime) t0) 1e6)))
       (send-pending! s))
     (catch Throwable e
       ;; a failing session is cut off; others keep running
@@ -70,10 +133,13 @@
   "Start a session running ctor (with args) as the root.
   opts: :send! (fn [bytes]) required; :executor; :on-error; :on-close;
   :window, unacknowledged messages allowed in flight (default 16)."
-  [ctor args {:keys [send! executor on-error on-close window] :or {executor pool window 16}}]
+  [ctor args {:keys [send! executor on-error on-close window budget] :or {executor pool window 16}}]
   (let [s-ref (volatile! nil)
+        stats (atom {:nodes 0 :bytes-out 0 :turns 0 :strikes 0})
         peer (rt/peer :server
                       :window window
+                      :on-mount (fn [f] (swap! stats update :nodes + (count (:nodes (:ctor f)))))
+                      :on-unmount (fn [f] (swap! stats update :nodes - (count (:nodes (:ctor f)))))
                       :post! (fn [g] (post! @s-ref g))
                       :on-schedule (fn [] (when-let [s @s-ref]
                                             (when-not (.get ^AtomicBoolean (:scheduled s))
@@ -83,7 +149,10 @@
         s {:peer peer :tasks (ConcurrentLinkedQueue.) :scheduled (AtomicBoolean. false)
            :executor executor :send! send! :on-error on-error :on-close on-close
            :encode (:encode link-out) :decode (:decode link-in)
-           :root (volatile! nil) :open (atom true)}]
+           :root (volatile! nil) :open (atom true)
+           :stats stats :budget (merge default-budget budget)
+           :bw (atom {:start (System/currentTimeMillis) :bytes 0 :over-since nil})
+           :timer timer}]
     (vreset! s-ref s)
     (.incrementAndGet ^AtomicLong (metrics :sessions))
     (post! s (fn [] (vreset! (:root s) (apply rt/mount-root! peer ctor args))))
