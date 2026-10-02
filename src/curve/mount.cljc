@@ -71,6 +71,44 @@
                                                         (when (fn? h)
                                                           ;; a server closure gets a serializable event
                                                           (h (if (rt/remote-fn? h) (d/event-data dom e) e))))))))
+        :spread (let [[id] more
+                      handlers (volatile! {})
+                      listening (volatile! #{})
+                      prev (volatile! {})
+                      upd (fn []
+                            (let [m (rt/value f id)]
+                              (when (map? m)
+                                (doseq [[k v] m]
+                                  (let [an (clojure.core/name k)]
+                                    (if (str/starts-with? an "on-")
+                                      (let [type (subs an 3)]
+                                        (vswap! handlers assoc type v)
+                                        (when-not (contains? @listening type)
+                                          (vswap! listening conj type)
+                                          (rt/on-cleanup! f (d/listen! dom node type
+                                                                       (fn [e] (when-let [h (get @handlers type)]
+                                                                                 (h (if (rt/remote-fn? h) (d/event-data dom e) e))))))))
+                                      (d/set-attr! dom node an (attr-value an v nil)))))
+                                (doseq [k (keys @prev) :when (not (contains? m k))]
+                                  (let [an (clojure.core/name k)]
+                                    (if (str/starts-with? an "on-")
+                                      (vswap! handlers dissoc (subs an 3))
+                                      (d/set-attr! dom node an nil))))
+                                (vreset! prev m))))]
+                  (upd)
+                  (rt/on-cleanup! f (rt/subscribe! f id upd)))
+        :foreign (let [[mf-id props-id] more
+                       inst (volatile! nil)
+                       upd (fn []
+                             (let [mf (rt/value f mf-id) props (rt/value f props-id)]
+                               (when (and (fn? mf) (not (rt/pending? props)) (not (rt/failure? props)))
+                                 (if-let [i @inst]
+                                   (when-let [u (:update i)] (u props))
+                                   (vreset! inst (mf node props))))))]
+                   (upd)
+                   (rt/on-cleanup! f (rt/subscribe! f props-id upd))
+                   (rt/on-cleanup! f (rt/subscribe! f mf-id upd))
+                   (rt/on-cleanup! f (fn [] (when-let [u (:unmount @inst)] (u)))))
         :child (let [[id] more]
                  (vswap! st assoc-in [:anchors id] node)
                  (when (= 1 (count path))

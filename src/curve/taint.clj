@@ -183,9 +183,9 @@
                 (when (and (nth @taints j) (contains? r k))
                   (error! qname (nth nodes j) (str "a secret value is passed to " callee ", which shows it on the client")))))))))
     ;; template holes are client reads
-    (doseq [[kind _ a b] holes]
-      (when-not (= :child kind)
-        (let [j (if (contains? #{:attr :event} kind) b a)]
-          (when (nth @taints j)
-            (error! qname (nth nodes j) "a secret value is rendered")))))
+    (doseq [[kind _ a b] holes
+            :when (not= :child kind)
+            j (case kind (:attr :event) [b] :foreign [a b] [a])]
+      (when (nth @taints j)
+        (error! qname (nth nodes j) "a secret value is rendered")))
     (when ret (nth @taints ret))))

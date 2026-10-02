@@ -109,10 +109,16 @@
 
 (defn on-cleanup! [f g] (vswap! (:cleanups f) conj g))
 
-(defn hole-node
-  "Node id a template hole reads: [:text p id] [:child p id] [:attr p name id prefix] [:event p type id]."
+(defn hole-nodes
+  "Node ids a template hole reads: [:text p id] [:child p id] [:spread p id]
+  [:attr p name id prefix] [:event p type id] [:foreign p mount-id props-id]."
   [[kind _ a b]]
-  (if (contains? #{:attr :event} kind) b a))
+  (case kind
+    (:attr :event) [b]
+    :foreign [a b]
+    [a]))
+
+(defn hole-node [hole] (first (hole-nodes hole)))
 
 (defn child-hole?
   "Is node i of ctor rendered as a child slot in the ctor's template?"
@@ -220,7 +226,7 @@
            (or (contains? env ::boundary) (contains? env ::suspense)))
     (let [hs (object-array (count (:nodes ctor)))]
       (doseq [hole (:holes (:render ctor))]
-        (when (not= :child (first hole)) (aset hs (hole-node hole) true)))
+        (when (not= :child (first hole)) (doseq [i (hole-nodes hole)] (aset hs i true))))
       hs)
     no-holes))
 
@@ -350,7 +356,8 @@
     ;; a rendered frame's template holes are read by the client
     (when (and @(:rendered f) (= me :server))
       (doseq [hole (:holes (:render (:ctor f)))]
-        (when (not= :child (first hole)) (remote-read! f (hole-node hole)))))))
+        (when (not= :child (first hole))
+          (doseq [i (hole-nodes hole)] (remote-read! f i)))))))
 
 ;; ---------------------------------------------------------------- compute
 
@@ -492,11 +499,14 @@
             prev-ks (get @(:order f) i)
             cur (or (children-of f i) {})
             ;; keys made unique per occurrence
-            ks (let [seen (volatile! {})]
-                 (mapv (fn [x] (let [k (kf x) n (get @seen k 0)]
-                                 (vswap! seen assoc k (inc n))
-                                 (if (zero? n) k [::dup k n])))
-                       items))
+            ks (if (:recycle nd)
+                 ;; keyed by position: scrolling reuses the same child frames
+                 (vec (range (count items)))
+                 (let [seen (volatile! {})]
+                   (mapv (fn [x] (let [k (kf x) n (get @seen k 0)]
+                                   (vswap! seen assoc k (inc n))
+                                   (if (zero? n) k [::dup k n])))
+                         items)))
             kset (set ks)
             captures (arg-srcs f (:args nd))]
         (doseq [[k c] cur] (when-not (contains? kset k) (unmount-frame! c)))

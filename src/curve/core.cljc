@@ -42,6 +42,10 @@
      (defmacro boundary "(r/boundary (fn [err retry] fallback) body) show fallback when body fails." [& body] (only-in-reactive &form))
      (defmacro suspense "(r/suspense fallback body) show fallback while body has pending values." [& body] (only-in-reactive &form))
      (defmacro -with-env [& body] (only-in-reactive &form))
+     (defmacro foreign
+       "(r/foreign mount props) give a DOM element to a JS component: (mount el
+       props) returns {:update (fn [props]) :unmount (fn [])}; props are reactive."
+       [& body] (only-in-reactive &form))
      (defmacro declassify
        "(r/declassify expr \"reason\") let a secret value reach the client.
        The reason is recorded in the boundary report."
@@ -61,6 +65,12 @@
   [e]
   #?(:cljs (if (map? e) (:value e) (.. e -target -value))
      :clj (or (:value e) (some-> (:target e) :props deref (get "value")))))
+
+(clojure.core/defn event-scroll-top
+  "scrollTop of a scroll event's target, on either platform."
+  [e]
+  #?(:cljs (if (map? e) (:scroll-top e) (.. e -target -scrollTop))
+     :clj (:scroll-top e)))
 
 (clojure.core/defn event-key
   "The key of a keyboard event, on either platform."

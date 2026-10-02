@@ -65,6 +65,7 @@
       (cond-> {:type (.-type e)}
         (and t (some? (.-value t))) (assoc :value (.-value t))
         (and t (= "checkbox" (.-type t))) (assoc :checked (.-checked t))
-        (.-key e) (assoc :key (.-key e))))))
+        (.-key e) (assoc :key (.-key e))
+        (and t (= "scroll" (.-type e))) (assoc :scroll-top (.-scrollTop t))))))
 
 (defn dom [] (BrowserDom.))

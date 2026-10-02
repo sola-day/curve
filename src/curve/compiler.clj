@@ -115,7 +115,7 @@
   '#{curve.core/server curve.core/client curve.core/for curve.core/watch curve.core/call
      curve.core/mutation curve.core/effect curve.core/suspense curve.core/boundary
      curve.core/binding curve.core/shared curve.core/offload curve.core/flow
-     curve.core/-with-env curve.core/route curve.core/defer curve.core/declassify})
+     curve.core/-with-env curve.core/route curve.core/defer curve.core/declassify curve.core/foreign})
 
 (defn- head-name [env h]
   (when (and (symbol? h) (not (local-name? env h)) (not (special-forms h)))
@@ -292,12 +292,13 @@
 
 (defn- compile-for [env [_ bindings & body :as form]]
   (let [[pat coll & opts] bindings
-        {kf :by} (apply hash-map opts)
+        {kf :by recycle :recycle} (apply hash-map opts)
         cid (compile-form (value-env env) coll)
         [[p] body] (param-binding [pat] body)
         {:keys [ctor captures]} (compile-child env [p] body)]
-    (add-node! (:b env) {:op :for :in [cid] :key (or kf `identity) :ctx-site (:site env)
-                         :ctor ctor :args captures})))
+    (add-node! (:b env) (cond-> {:op :for :in [cid] :key (or kf `identity) :ctx-site (:site env)
+                                 :ctor ctor :args captures}
+                          recycle (assoc :recycle true)))))
 
 (defn- compile-with-bind
   "Compile body as an inline child whose env gains {key node-id} entries."
@@ -349,6 +350,10 @@
          (curve.core/client (curve.core/effect (curve.runtime/defer! ~opts (fn [] (reset! !ready# true)))))
          (if ready# (do ~@body) ~(:placeholder opts))))
 
+    curve.core/foreign
+    (let [[mf props] args]
+      [:div.curve-foreign {:curve/foreign [mf props]}])
+
     curve.core/mutation
     (let [[f] args]
       `(let [g# (curve.core/server ~f)]
@@ -386,7 +391,8 @@
           (let [rid (compile-form (value-env env) (first args))]
             (add-node! (:b env) {:op :watch :site (:site env) :in [rid]}))
           (contains? '#{curve.core/boundary curve.core/suspense curve.core/flow
-                        curve.core/offload curve.core/mutation curve.core/route curve.core/defer} q)
+                        curve.core/offload curve.core/mutation curve.core/route curve.core/defer
+                        curve.core/foreign} q)
           (compile-form env (rewrite q form))
           (= q 'curve.core/declassify)
           (let [[x reason] args]
@@ -500,6 +506,14 @@
                  (fn [acc k v]
                    (let [an (name k)]
                      (cond
+                       ;; {:& m} spreads a map of attributes and handlers
+                       (= k :&)
+                       (do (swap! holes conj [:spread path (compile-form venv v)]) acc)
+                       ;; {:curve/foreign [mount props]} hands this element to a JS component
+                       (= k :curve/foreign)
+                       (let [[mf props] v]
+                         (swap! holes conj [:foreign path (compile-form venv mf) (compile-form venv props)])
+                         acc)
                        (event-key? k)
                        (do (swap! holes conj [:event path (subs an 3) (compile-form venv v)]) acc)
                        (static-value? v)
@@ -643,13 +657,18 @@
     (:branch :for :mount) #{:client :server}
     #{}))
 
+(defn hole-reads
+  "Node ids a template hole reads (same rule as curve.runtime/hole-nodes)."
+  [[kind _ a b]]
+  (case kind (:attr :event) [b] :foreign [a b] [a]))
+
 (defn- with-dead
   "Pure nodes whose value nobody reads, renders or returns are not computed."
   [nodes ret holes]
   (let [used (into #{ret} (concat (mapcat :in nodes) (mapcat #(apply concat (:args %)) (filter #(= :branch (:op %)) nodes))
                                   (mapcat :args (filter #(contains? #{:for} (:op %)) nodes))
                                   (vals (apply merge (keep :bind nodes)))
-                                  (keep (fn [h] (let [[kind _ a b] h] (if (contains? #{:attr :event} kind) b a))) holes)))]
+                                  (mapcat hole-reads holes)))]
     (vec (map-indexed (fn [i nd] (if (and (:pure nd) (not (contains? used i)) (empty? (:readers nd)))
                                    (assoc nd :dead true) nd))
                       nodes))))
@@ -683,7 +702,8 @@
                 (:sel nd) (assoc :sel (:sel nd))
                 (:bind nd) (assoc :bind (list 'quote (:bind nd))))
       :dyn (assoc base :var (list 'quote (:var nd)) :default (:default nd))
-      :for (assoc base :key (:key nd) :ctor (emit-ctor target (:ctor nd)) :args (:args nd))
+      :for (cond-> (assoc base :key (:key nd) :ctor (emit-ctor target (:ctor nd)) :args (:args nd))
+             (:recycle nd) (assoc :recycle true))
       :mount (cond-> base (:ctor-sym nd) (assoc :ctor-fn `(fn [] ~(:ctor-sym nd))))
       (merge base (dissoc nd :b)))))
 
@@ -763,7 +783,7 @@
     ((fn walk [b ret path]
        (let [nodes @(:nodes b)
              holes (:holes (builder-info b ret))
-             hole-ids (set (keep (fn [[k _ x y]] (when (not= :child k) (if (contains? #{:attr :event} k) y x))) holes))
+             hole-ids (set (mapcat hole-reads (remove #(= :child (first %)) holes)))
              readers (with-readers nodes)]
          (doseq [[i nd] (map-indexed vector readers)]
            (let [from (:site nd)
