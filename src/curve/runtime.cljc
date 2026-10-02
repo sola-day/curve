@@ -48,7 +48,7 @@
 (defrecord Frame [peer ctor site parent node key depth seq-id
                   ^objects vals #?(:clj ^booleans dirty :cljs dirty) ^objects subs ^objects exported ^objects sent
                   children cleanups remote-id alive arg-srcs order watching effects rendered shared
-                  ^objects plan queued ^objects deps env ^objects holes])
+                  ^objects plan queued ^objects deps env ^objects holes seed])
 
 (defn kids-seq
   "Child frames of a node: nil, a single frame, or a map key -> frame."
@@ -238,7 +238,10 @@
              (plan-for peer ctor site) (volatile! false)
              (deps-of peer ctor)
              env
-             (hole-flags peer ctor r env))))
+             (hole-flags peer ctor r env)
+             (volatile! (if parent
+                          (get-in @(:seed parent) [:kids [(:sid (nth (:nodes (:ctor parent)) node)) key]])
+                          @(:root-seed peer))))))
 
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."
@@ -271,13 +274,17 @@
     (on-cleanup! f #(doseq [g (vals @(:effects f))] (g)))
     (on-cleanup! f #(doseq [{:keys [release]} (vals @(:shared f))] (release)))
     (vswap! (:frames peer) assoc (:seq-id f) f)
-    ;; everything computable starts dirty; constants are set directly
-    (dotimes [i (count nodes)]
-      (let [nd (nth nodes i)]
-        (case (:op nd)
-          :arg nil
-          :const (aset ^objects (:vals f) i (:v nd))
-          (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true))))
+    ;; everything computable starts dirty; constants are set directly; local
+    ;; state carried over by a hot reload is seeded by stable id
+    (let [state (:state @(:seed f))]
+      (dotimes [i (count nodes)]
+        (let [nd (nth nodes i)]
+          (case (:op nd)
+            :arg nil
+            :const (aset ^objects (:vals f) i (:v nd))
+            (if (and state (contains? state (:sid nd)))
+              (aset ^objects (:vals f) i (get state (:sid nd)))
+              (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true))))))
     (export! f)
     (when-let [hook (:on-mount peer)] (hook f))
     (when parent (bind-child! peer f))
@@ -878,6 +885,7 @@
                   :out-ids (volatile! {})
                   :out-frames (volatile! {})
                   :to-ack (volatile! 0)
+                  :root-seed (volatile! nil)
                   :in-flight (volatile! 0)
                   :window nil
                   :clock clock/host
@@ -912,6 +920,48 @@
     f))
 
 (defn frames [peer] (vals @(:frames peer)))
+
+;; ---- hot reload
+
+(defn- local-state? [nd] (and (= :call (:op nd)) (empty? (:in nd)) (:sid nd)))
+
+(defn snapshot
+  "Local state of a frame tree by stable ids: the values of input-less call
+  nodes (atoms and other per-frame state), recursively through children."
+  [f]
+  (let [nodes (:nodes (:ctor f))]
+    {:state (into {} (keep (fn [i] (let [nd (nth nodes i) v (value f i)]
+                                     (when (and (local-state? nd) (not (pending? v)) (not (failure? v)))
+                                       [(:sid nd) v])))
+                           (range (count nodes))))
+     :kids (into {} (for [[i kids] @(:children f)
+                          c (kids-seq kids)]
+                      [[(:sid (nth nodes i)) (:key c)] (snapshot c)]))}))
+
+(defn- stale? [f]
+  (let [cur (ctor-by-name (:name (:ctor f)))]
+    (and cur (not (identical? cur (:ctor f))))))
+
+(defn reload!
+  "Swap in newly registered versions of reactive fns. Frames running a stale
+  version are remounted; local state is carried over by stable id. Returns
+  the new root when the root itself was swapped."
+  [peer]
+  (let [root (first (filter #(nil? (:parent %)) (frames peer)))]
+    (if (and root (stale? root))
+      (let [seed (snapshot root)
+            args (mapv #(value root %) (:arg-ids (:ctor root)))]
+        (unmount-frame! root)
+        (vreset! (:root-seed peer) seed)
+        (let [r (apply mount-root! peer (ctor-by-name (:name (:ctor root))) args)]
+          (vreset! (:root-seed peer) nil)
+          r))
+      (do (doseq [f (frames peer)
+                  :when (and @(:alive f) (:parent f) (stale? f))]
+            (let [p (:parent f)]
+              (vswap! (:seed p) assoc-in [:kids [(:sid (nth (:nodes (:ctor p)) (:node f))) (:key f)]] (snapshot f))
+              (mark-dirty! p (:node f))))
+          root))))
 
 (defn defer!
   "Call ready! when :when happens: :idle (default) or :interaction (first

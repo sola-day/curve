@@ -224,7 +224,8 @@
                          (assoc-in e [:locals p] id)))
                      env' params)
         ret (compile-form env' body)]
-    {:ctor {:b b :ret ret :name (gensym (str (:name env) "-"))}
+    ;; deterministic names: a child keeps its identity across recompiles
+    {:ctor {:b b :ret ret :name (symbol (str (:qname env) "-" (swap! (:child-counter env) inc)))}
      :captures @(:captures b)}))
 
 (defn- simple? [env x] (or (literal? x) (and (symbol? x) (local-name? env x))))
@@ -562,7 +563,7 @@
   (or (= target :clj) (not= site :server)))
 
 (defn- emit-node [target nd]
-  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate])]
+  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid])]
     (case (:op nd)
       :arg base
       :const (assoc base :v (list 'quote (:v nd)))
@@ -577,10 +578,26 @@
       :mount (cond-> base (:ctor-sym nd) (assoc :ctor-fn `(fn [] ~(:ctor-sym nd))))
       (merge base (dissoc nd :b)))))
 
+(defn- with-sids
+  "Stable node ids: a hash of what the node computes and of its inputs' ids,
+  so an unchanged subexpression keeps its id when the function around it is
+  edited. Hot reload carries local state across by these ids."
+  [ctor-name nodes]
+  (let [seen (volatile! {})]
+    (reduce (fn [acc nd]
+              (let [base (hash [(:op nd) (pr-str (or (:form nd) (:v nd) (:var nd) (:code nd)))
+                                (mapv #(:sid (nth acc %)) (:in nd))
+                                (when (= :arg (:op nd)) (count acc))])
+                    n (get @seen base 0)
+                    sid (if (zero? n) base (hash [base n]))]
+                (vswap! seen assoc base (inc n))
+                (conj acc (assoc nd :sid sid))))
+            [] nodes)))
+
 (defn emit-ctor
   "Emit code that builds the runtime ctor for a compiled builder."
   [target {:keys [b ret name site extra]}]
-  (let [nodes (with-readers @(:nodes b))
+  (let [nodes (with-sids name (with-readers @(:nodes b)))
         render (or @(:render b) (derived-render b ret))]
     `(curve.runtime/ctor
        ~(merge {:name (list 'quote name)
@@ -596,15 +613,30 @@
 
 ;; ------------------------------------------------------------------ entry
 
+(defonce ^:private cache (atom {}))
+
+(declare compile-defn*)
+
 (defn compile-defn
-  "Compile (r/defn name [params] body...) to ctor code."
+  "Compile (r/defn name [params] body...) to ctor code. Incremental: an
+  unchanged definition (same source, same set of known reactive fns) reuses
+  its previous output."
   [menv qname params body opts]
+  (let [k [qname (cljs? menv) (pr-str params body) (dissoc opts :menv) (hash @registry)]]
+    (or (get @cache k)
+        (let [code (compile-defn* menv qname params body opts)]
+          (swap! cache assoc k code)
+          code))))
+
+(defn cache-size [] (count @cache))
+
+(defn compile-defn* [menv qname params body opts]
   (let [b (new-builder)
         target (if (cljs? menv) :cljs :clj)
         site (or (:site opts) :inherit)
         [syms body] (param-binding params body)
         env {:b b :locals {} :outer nil :site site :menv menv :name (symbol (name qname))
-             :render? true}
+             :qname qname :child-counter (atom 0) :render? true}
         env (reduce (fn [e p]
                       (let [id (add-node! b {:op :arg})]
                         (swap! (:arg-ids b) conj id)
