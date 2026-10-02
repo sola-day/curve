@@ -571,8 +571,20 @@
 (defn- settled? [x] (not (or (pending? x) (failure? x))))
 
 
+(defn- set-identical!
+  "Memo cost model: a node that builds a fresh collection every time is
+  compared by identity only; a deep = would cost more than it saves."
+  [^Frame f i v]
+  (let [^objects vs (.-vals f)
+        old (aget vs i)]
+    (when-not (identical? old v)
+      (aset vs i v)
+      (track! f i old v)
+      (changed! f i))))
+
 (defn- call-step [nd]
-  (let [g (:f nd) in (:in nd)]
+  (let [g (:f nd) in (:in nd)
+        set-live! (if (= :identical (:eq nd)) set-identical! set-live!)]
     (case (count in)
       0 (fn [f i] (set-live! f i (guarded (g))))
       1 (let [a (int (nth in 0))]
@@ -600,7 +612,7 @@
              (fn [f i] (if-let [[pf pi] (get @(:arg-srcs f) i)]
                          (set-cell! f i (value pf pi))
                          (set-cell! f i (if dflt (guarded (dflt)) nil)))))
-      :call (when mine? (call-step nd))
+      :call (when (and mine? (not (:dead nd))) (call-step nd))
       :watch (when mine? (fn [f i] (set-cell! f i (guarded (compute-watch f i nd)))))
       :effect (when mine? (fn [f i] (set-cell! f i (compute-effect f i nd))))
       :shared (when mine? (fn [f i] (set-cell! f i (compute-shared f i nd))))

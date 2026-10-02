@@ -170,19 +170,24 @@
 
 (defn- const! [env v] (add-node! (:b env) {:op :const :v v}))
 
+(declare check-no-mutation! pure-form? fresh-collection?)
+
 (defn- lift
   "One host fn node computing form from the reactive locals it mentions."
   [env form]
   (if (literal? form)
     (const! env form)
-    (let [syms (free-locals env form)
+    (let [_ (check-no-mutation! env form)
+          syms (free-locals env form)
           ids (mapv #(resolve-local env %) syms)
           ;; a qualified dynamic var cannot be a param name: substitute
           renames (into {} (keep (fn [s] (when (namespace s) [s (gensym (str (name s) "_"))]))) syms)
           params (mapv #(get renames % %) syms)
           body (if (seq renames) (clojure.walk/postwalk-replace renames form) form)]
       (add-node! (:b env) {:op :call :site (:site env)
-                           :code `(fn [~@params] ~body) :in ids :form form}))))
+                           :code `(fn [~@params] ~body) :in ids :form form
+                           :pure (pure-form? env form)
+                           :eq (when (fresh-collection? form) :identical)}))))
 
 (defn- value-env [env] (assoc env :render? false))
 
@@ -531,6 +536,70 @@
     {:tree [:hole]
      :holes [[(if (contains? #{:branch :for :mount} (:op nd)) :child :text) [0] ret]]}))
 
+;; ------------------------------------------------------------------ effects
+;; Effect signatures (design §17.4): known-pure core fns; anything unknown is
+;; assumed impure, so analysis stays cheap and errs on the safe side.
+
+(def pure-fns
+  '#{+ - * / inc dec quot rem mod max min abs = not= < > <= >= == zero? pos? neg? even? odd?
+     not and or str subs name namespace keyword symbol format pr-str
+     get get-in assoc assoc-in dissoc update update-in merge select-keys keys vals find contains?
+     first second rest next last butlast nth count empty? seq vec vector list hash-map hash-set set
+     conj cons concat into map mapv filter filterv remove keep reduce sort sort-by group-by frequencies
+     take drop take-while drop-while partition distinct reverse range repeat interleave interpose zipmap
+     some every? identity constantly comp partial juxt boolean int long double nil? some? true? false?
+     number? string? keyword? map? vector? coll? fn? clojure.string/join clojure.string/upper-case
+     clojure.string/lower-case clojure.string/trim clojure.string/blank? clojure.string/includes?
+     clojure.string/split clojure.string/replace clojure.string/starts-with?})
+
+(def mutating-fns
+  '#{swap! reset! vswap! vreset! compare-and-set! swap-vals! reset-vals! set! aset}
+  )
+
+(defn- core-name [env sym]
+  (when (symbol? sym)
+    (when-let [q (:name (host-resolve (:menv env) sym))]
+      (when (contains? #{"clojure.core" "cljs.core" "clojure.string"} (namespace q))
+        (if (= "clojure.string" (namespace q)) q (symbol (name q)))))))
+
+(defn- walk-calls
+  "Call heads in form, not descending into fn bodies (they run later)."
+  [env form]
+  (let [acc (volatile! [])]
+    ((fn walk [x]
+       (cond
+         (and (seq? x) (= 'quote (first x))) nil
+         (and (seq? x) (fn-form? env x)) nil
+         (seq? x) (do (vswap! acc conj (first x)) (run! walk (rest x)))
+         (map? x) (run! walk (mapcat identity x))
+         (coll? x) (run! walk x)))
+     form)
+    @acc))
+
+(defn- pure-form?
+  [env form]
+  (every? (fn [h] (or (keyword? h)
+                      (and (symbol? h) (local-name? env h))
+                      (contains? pure-fns (core-name env h))
+                      (contains? '#{if let let* do when when-not cond case fn fn* quote} h)))
+          (walk-calls env form)))
+
+(defn- check-no-mutation!
+  "State changes belong in event handlers or r/effect, not in a value."
+  [env form]
+  (doseq [h (walk-calls env form)]
+    (when (contains? mutating-fns (core-name env h))
+      (error! env form (str "`" h "` inside a reactive value; move it into an event handler or r/effect")))))
+
+(defn- fresh-collection?
+  "Does form build a new collection every time (looking through do/let tails)?"
+  [form]
+  (cond
+    (or (vector? form) (map? form) (set? form)) true
+    (and (seq? form) (contains? '#{do let let*} (first form))) (fresh-collection? (last form))
+    (seq? form) (contains? '#{vector hash-map hash-set list vec mapv filterv into} (first form))
+    :else false))
+
 ;; ------------------------------------------------------------------ readers
 
 (defn- reader-inputs [nd]
@@ -545,6 +614,17 @@
     (:call :watch :effect :shared) #{(:site nd)}
     (:branch :for :mount) #{:client :server}
     #{}))
+
+(defn- with-dead
+  "Pure nodes whose value nobody reads, renders or returns are not computed."
+  [nodes ret holes]
+  (let [used (into #{ret} (concat (mapcat :in nodes) (mapcat #(apply concat (:args %)) (filter #(= :branch (:op %)) nodes))
+                                  (mapcat :args (filter #(contains? #{:for} (:op %)) nodes))
+                                  (vals (apply merge (keep :bind nodes)))
+                                  (keep (fn [h] (let [[kind _ a b] h] (if (contains? #{:attr :event} kind) b a))) holes)))]
+    (vec (map-indexed (fn [i nd] (if (and (:pure nd) (not (contains? used i)) (empty? (:readers nd)))
+                                   (assoc nd :dead true) nd))
+                      nodes))))
 
 (defn with-readers [nodes]
   (let [rs (reduce (fn [acc nd]
@@ -563,7 +643,7 @@
   (or (= target :clj) (not= site :server)))
 
 (defn- emit-node [target nd]
-  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid])]
+  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq])]
     (case (:op nd)
       :arg base
       :const (assoc base :v (list 'quote (:v nd)))
@@ -597,8 +677,8 @@
 (defn emit-ctor
   "Emit code that builds the runtime ctor for a compiled builder."
   [target {:keys [b ret name site extra]}]
-  (let [nodes (with-sids name (with-readers @(:nodes b)))
-        render (or @(:render b) (derived-render b ret))]
+  (let [render (or @(:render b) (derived-render b ret))
+        nodes (with-sids name (with-dead (with-readers @(:nodes b)) ret (:holes render)))]
     `(curve.runtime/ctor
        ~(merge {:name (list 'quote name)
                 :ret ret

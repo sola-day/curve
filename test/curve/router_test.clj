@@ -18,9 +18,10 @@
   (is (= "/products?q=x" (router/href routes :products {} {:q "x"}))))
 
 (def server-lookups (atom []))
+(defn lookup! [id] (swap! server-lookups conj id) (str "#" id))
 
 (r/defn Product [id]
-  [:div.product "product " (r/server (do (swap! server-lookups conj id) (str "#" id)))])
+  [:div.product "product " (r/server (lookup! id))])
 
 (r/defn App []
   (let [{:keys [page params]} (r/route routes)]
