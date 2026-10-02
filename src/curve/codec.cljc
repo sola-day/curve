@@ -107,6 +107,8 @@
 (def ^:private T-KW-NEW 6) (def ^:private T-KW-REF 7) (def ^:private T-VEC 8)
 (def ^:private T-MAP 9) (def ^:private T-SET 10) (def ^:private T-SYM 11)
 (def ^:private T-INST 12) (def ^:private T-UUID 13)
+(def ^:private T-SHAPE-NEW 14) (def ^:private T-SHAPE-REF 15)
+(def ^:private T-F64 16) (def ^:private T-I32 17)
 
 (defn- safe-int? [x]
   #?(:clj (and (integer? x) (instance? Long (try (long x) (catch Exception _ nil))))
@@ -133,6 +135,13 @@
 
 (defn- kw-name [k] (if-let [n (namespace k)] (str n "/" (name k)) (name k)))
 
+(defn- shape-of
+  "Records (maps with 2+ keyword keys) share a shape: its sorted keys. The
+  first map of a shape sends the keys; later ones only the shape id."
+  [m]
+  (when (and (> (count m) 1) (not (record? m)) (every? keyword? (keys m)))
+    (vec (sort (keys m)))))
+
 (defn write-value! [st o x]
   (cond
     (nil? x) (put! o T-NIL)
@@ -145,8 +154,26 @@
                    (do (put! o T-KW-REF) (uvarint! o i))
                    (do (vswap! (:kws st) assoc x (count @(:kws st)))
                        (put! o T-KW-NEW) (str! o (kw-name x))))
-    (map? x) (do (put! o T-MAP) (uvarint! o (count x))
-                 (doseq [[k v] x] (write-value! st o k) (write-value! st o v)))
+    (map? x) (if-let [shape (shape-of x)]
+               (if-let [sid (get @(:shapes st) shape)]
+                 (do (put! o T-SHAPE-REF) (uvarint! o sid)
+                     (doseq [k shape] (write-value! st o (get x k))))
+                 (do (vswap! (:shapes st) assoc shape (count @(:shapes st)))
+                     (put! o T-SHAPE-NEW) (uvarint! o (count shape))
+                     (doseq [k shape] (write-value! st o k))
+                     (doseq [k shape] (write-value! st o (get x k)))))
+               (do (put! o T-MAP) (uvarint! o (count x))
+                   (doseq [[k v] x] (write-value! st o k) (write-value! st o v))))
+    #?(:clj (instance? (Class/forName "[D") x) :cljs (instance? js/Float64Array x))
+    (let [^doubles a x n (alength a)]
+      (put! o T-F64) (uvarint! o n)
+      #?(:clj (let [bb (ByteBuffer/allocate (* 8 n))] (dotimes [i n] (.putDouble bb (aget a i))) (put-bytes! o (.array bb)))
+         :cljs (put-bytes! o (js/Uint8Array. (.slice (.-buffer a) (.-byteOffset a) (+ (.-byteOffset a) (* 8 n)))))))
+    #?(:clj (instance? (Class/forName "[I") x) :cljs (instance? js/Int32Array x))
+    (let [^ints a x n (alength a)]
+      (put! o T-I32) (uvarint! o n)
+      #?(:clj (let [bb (ByteBuffer/allocate (* 4 n))] (dotimes [i n] (.putInt bb (aget a i))) (put-bytes! o (.array bb)))
+         :cljs (put-bytes! o (js/Uint8Array. (.slice (.-buffer a) (.-byteOffset a) (+ (.-byteOffset a) (* 4 n)))))))
     (set? x) (do (put! o T-SET) (uvarint! o (count x)) (doseq [v x] (write-value! st o v)))
     (or (vector? x) (seq? x)) (do (put! o T-VEC) (uvarint! o (count x)) (doseq [v x] (write-value! st o v)))
     (symbol? x) (do (put! o T-SYM) (str! o (str x)))
@@ -170,6 +197,23 @@
       T-SYM (symbol (read-str r))
       T-INST (let [ms (unzigzag (read-uvarint r))] #?(:clj (java.util.Date. (long ms)) :cljs (js/Date. ms)))
       T-UUID (parse-uuid (read-str r))
+      T-SHAPE-NEW (let [n (read-uvarint r)
+                        ks (loop [i 0 acc []] (if (< i n) (recur (inc i) (conj acc (read-value st r))) acc))]
+                    (vswap! (:shapes st) conj ks)
+                    (zipmap ks (map (fn [_] (read-value st r)) ks)))
+      T-SHAPE-REF (let [ks (nth @(:shapes st) (read-uvarint r))]
+                    (loop [ks ks acc (transient {})]
+                      (if-let [k (first ks)] (recur (rest ks) (assoc! acc k (read-value st r))) (persistent! acc))))
+      T-F64 (let [n (read-uvarint r) {:keys [buf pos]} r p @pos]
+              (vswap! pos + (* 8 n))
+              #?(:clj (let [bb (ByteBuffer/wrap ^bytes buf (int p) (int (* 8 n))) a (double-array n)]
+                        (dotimes [i n] (aset a i (.getDouble bb))) a)
+                 :cljs (js/Float64Array. (.slice (.-buffer buf) (+ (.-byteOffset buf) p) (+ (.-byteOffset buf) p (* 8 n))))))
+      T-I32 (let [n (read-uvarint r) {:keys [buf pos]} r p @pos]
+              (vswap! pos + (* 4 n))
+              #?(:clj (let [bb (ByteBuffer/wrap ^bytes buf (int p) (int (* 4 n))) a (int-array n)]
+                        (dotimes [i n] (aset a i (.getInt bb))) a)
+                 :cljs (js/Int32Array. (.slice (.-buffer buf) (+ (.-byteOffset buf) p) (+ (.-byteOffset buf) p (* 4 n))))))
       (throw (ex-info "curve.codec: bad value tag" {:tag t})))))
 
 ;; ---------------------------------------------------------------- deltas
@@ -251,9 +295,9 @@
 (defn state
   "Per-direction codec state (keyword interning). Use one for encoding on the
   sender and a matching one for decoding on the receiver."
-  [] {:kws (volatile! {})})
+  [] {:kws (volatile! {}) :shapes (volatile! {})})
 
-(defn decoder-state [] {:kws (volatile! [])})
+(defn decoder-state [] {:kws (volatile! []) :shapes (volatile! [])})
 
 (defn encode-delta-blob
   "Encode a delta with no connection state, for reuse across connections."
@@ -265,7 +309,7 @@
 
 (defn encode
   "Encode a message map to bytes."
-  [st {:keys [decl vals drop call ret]}]
+  [st {:keys [decl vals drop call ret] :as m}]
   (let [o (new-out)
         section (fn [tag xs f] (when (seq xs) (put! o tag) (uvarint! o (count xs)) (doseq [x xs] (f x))))]
     (section 1 decl (fn [[id pid node key]] (uvarint! o id) (uvarint! o pid) (uvarint! o node) (write-value! st o key)))
@@ -273,6 +317,7 @@
     (section 3 drop (fn [id] (uvarint! o id)))
     (section 4 call (fn [[token id node args]] (uvarint! o token) (uvarint! o id) (uvarint! o node) (write-value! st o args)))
     (section 5 ret (fn [[token ok v]] (uvarint! o token) (write-value! st o ok) (write-value! st o v)))
+    (when-let [n (:ack m)] (put! o 6) (uvarint! o n))
     (out-bytes o)))
 
 (defn decode
@@ -285,20 +330,22 @@
     (loop [m {}]
       (if (>= @(:pos r) n)
         m
-        (let [tag (read-uvarint r)
-              entries (read-n r (case tag
+        (let [tag (read-uvarint r)]
+         (if (= tag 6)
+          (recur (assoc m :ack (read-uvarint r)))
+          (let [entries (read-n r (case tag
                                   1 #(vector (read-uvarint r) (read-uvarint r) (read-uvarint r) (read-value st r))
                                   2 #(vector (read-uvarint r) (read-uvarint r) (read-delta st r))
                                   3 #(read-uvarint r)
                                   4 #(vector (read-uvarint r) (read-uvarint r) (read-uvarint r) (read-value st r))
                                   5 #(vector (read-uvarint r) (read-value st r) (read-value st r))
                                   (throw (ex-info "curve.codec: bad section" {:tag tag}))))]
-          (recur (assoc m (case tag 1 :decl 2 :vals 3 :drop 4 :call 5 :ret) entries)))))))
+          (recur (assoc m (case tag 1 :decl 2 :vals 3 :drop 4 :call 5 :ret) entries)))))))))
 
 (defn combine
-  "Messages form a monoid under section-wise concatenation."
+  "Messages form a monoid under section-wise concatenation (acks add)."
   [a b]
-  (merge-with into a b))
+  (merge-with (fn [x y] (if (number? x) (+ x y) (into x y))) a b))
 
 (defn link
   "A pair of matching encoder/decoder states for one direction:

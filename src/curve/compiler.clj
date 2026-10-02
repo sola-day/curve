@@ -411,7 +411,17 @@
 
 (declare compile-element)
 
-(defn compile-form [env form]
+(declare compile-form*)
+
+(defn compile-form
+  "Compile form; ^{:rate n} on a form becomes a send-rate hint on its node."
+  [env form]
+  (let [id (compile-form* env form)]
+    (when-let [r (:rate (meta form))]
+      (swap! (:nodes (:b env)) update id assoc :rate r))
+    id))
+
+(defn compile-form* [env form]
   (cond
     (and (:render? env) (vector? form) (keyword? (first form)))
     (compile-element env form)
@@ -552,7 +562,7 @@
   (or (= target :clj) (not= site :server)))
 
 (defn- emit-node [target nd]
-  (let [base (select-keys nd [:op :site :in :readers :ctx-site])]
+  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate])]
     (case (:op nd)
       :arg base
       :const (assoc base :v (list 'quote (:v nd)))

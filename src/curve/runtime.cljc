@@ -23,7 +23,8 @@
   nest (branch, mount, for); a child's identity on both peers is the path
   (parent, node, key), so peers agree without coordination."
   (:refer-clojure :exclude [run!])
-  (:require [curve.codec :as codec]
+  (:require [curve.clock :as clock]
+            [curve.codec :as codec]
             [curve.delta :as delta])
   #?(:cljs (:require-macros [curve.runtime :refer [guarded]])))
 
@@ -696,9 +697,30 @@
           (vswap! (:outbox (:peer f)) update :vals (fnil conj []) [id i [:raw bs]])))
       (aset sent i [::version version]))))
 
+(defn- rate-deferred?
+  "A cell with a :rate hint is sent at most rate times a second; a change
+  that comes too soon waits (and is coalesced with later ones)."
+  [peer f i]
+  (when-let [rate (:rate (node-at f i))]
+    (let [k [(:seq-id f) i]
+          now (clock/now (:clock peer))
+          interval (/ 1000 rate)
+          last (get @(:last-sent peer) k)]
+      (if (and last (< (- now last) interval))
+        (do (when-not (contains? @(:rate-wakeups peer) k)
+              (vswap! (:rate-wakeups peer) conj k)
+              (clock/schedule! (:clock peer) (- interval (- now last))
+                               (fn [] ((:post! peer)
+                                       (fn [] (vswap! (:rate-wakeups peer) disj k)
+                                         (when-let [h (:on-schedule peer)] (h)))))))
+            true)
+        (do (vswap! (:last-sent peer) assoc k now) false)))))
+
 (defn- collect-out! [peer]
-  (doseq [[f i] (vals @(:dirty-out peer))]
-    (when @(:alive f)
+  (let [later (volatile! (sorted-map))]
+  (doseq [[f i :as e] (vals @(:dirty-out peer))]
+    (when (and @(:alive f)
+               (if (rate-deferred? peer f i) (do (vswap! later assoc [(:seq-id f) i] e) false) true))
       (if-let [sh (let [sh (get @(:shared f) i) v (value f i)]
                     (when (and sh (not (pending? v)) (not (failure? v))) sh))]
         (send-shared! f i sh)
@@ -710,15 +732,27 @@
           (aset sent i (if (nil? v) ::nil v))
           (let [id (out-id f)]
             (vswap! (:outbox peer) update :vals (fnil conj []) [id i d])))))))
-  (vreset! (:dirty-out peer) (sorted-map)))
+  (vreset! (:dirty-out peer) @later)))
+
+(defn has-pending-output? [peer]
+  (boolean (or (seq @(:dirty-out peer)) (seq @(:outbox peer)) (pos? @(:to-ack peer)))))
 
 (defn take-message!
-  "Collect everything to send since the last call. nil when there is nothing."
+  "Collect everything to send since the last call. nil when there is
+  nothing, or when :window messages are already unacknowledged (backpressure:
+  changes keep accumulating and are coalesced until acks arrive)."
   [peer]
-  (collect-out! peer)
-  (let [m @(:outbox peer)]
-    (vreset! (:outbox peer) {})
-    (when (seq m) m)))
+  (let [w (:window peer)
+        blocked? (and w (>= @(:in-flight peer) w))]
+    (when-not blocked? (collect-out! peer))
+    (let [m (if blocked? {} @(:outbox peer))
+          acks @(:to-ack peer)
+          m (if (pos? acks) (assoc m :ack acks) m)]
+      (when-not blocked? (vreset! (:outbox peer) {}))
+      (vreset! (:to-ack peer) 0)
+      (when (seq m)
+        (when (seq (dissoc m :ack)) (vswap! (:in-flight peer) inc))
+        m))))
 
 ;; ---- receiving
 
@@ -798,7 +832,12 @@
 
 (defn receive!
   "Apply a message from the other peer."
-  [peer {:keys [decl vals drop call ret]}]
+  [peer {:keys [decl vals drop call ret ack] :as msg}]
+  ;; every message with content is acknowledged (piggybacked on the next one)
+  (when (seq (dissoc msg :ack)) (vswap! (:to-ack peer) inc))
+  (when ack
+    (vswap! (:in-flight peer) #(max 0 (- % ack)))
+    (when (and (seq @(:dirty-out peer)) (:on-schedule peer)) ((:on-schedule peer))))
   (doseq [[id pid node key] decl]
     (vswap! (:decls peer) assoc [pid node key] id)
     (when-let [p (frame-by-in-id peer pid)]
@@ -838,6 +877,12 @@
                   :next-wire-id (volatile! 0)
                   :out-ids (volatile! {})
                   :out-frames (volatile! {})
+                  :to-ack (volatile! 0)
+                  :in-flight (volatile! 0)
+                  :window nil
+                  :clock clock/host
+                  :last-sent (volatile! {})
+                  :rate-wakeups (volatile! #{})
                   :in-frames (volatile! {})
                   :decls (volatile! {})
                   :stash (volatile! {})

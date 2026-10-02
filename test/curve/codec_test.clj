@@ -1,5 +1,6 @@
 (ns curve.codec-test
   (:require [clojure.test :refer [deftest is]]
+            [clojure.walk]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -17,7 +18,10 @@
 (defn- roundtrip [m]
   (let [{:keys [encode decode]} (c/link)] (decode (encode m))))
 
-(defn- same? [a b] (= (pr-str a) (pr-str b))) ; NaN-safe
+(defn- no-nan [x]
+  (clojure.walk/postwalk #(if (and (double? %) (Double/isNaN %)) ::nan %) x))
+
+(defn- same? [a b] (= (no-nan a) (no-nan b)))
 
 (defn- delta-ok?
   "A delta survives the wire when it patches to the same value."
@@ -53,3 +57,26 @@
 (deftest rejects-unknown-types-and-garbage
   (is (thrown? Exception (c/encode (c/state) {:vals [[0 0 [:v (Object.)]]]})))
   (is (thrown? Exception (c/decode (c/decoder-state) (byte-array [9 1 2 3])))))
+
+(deftest columnar-records
+  (let [rows (vec (for [i (range 100)] {:id i :name (str "p" i) :price (* 1.5 i)}))
+        {:keys [encode decode]} (c/link)
+        bs (encode {:vals [[0 1 [:v rows]]]})]
+    (is (= rows (second (nth (first (:vals (decode bs))) 2))))
+    ;; id ~2, name ~5, price 9 bytes + 2 for the shape reference
+    (is (< (/ (c/byte-count bs) 100) 20) "keys are sent once per shape")))
+
+(deftest typed-arrays
+  (let [{:keys [encode decode]} (c/link)
+        xs (double-array [1.5 -2.25 3e10])
+        ys (int-array [1 -2 3])
+        m (decode (encode {:vals [[0 1 [:v xs]] [0 2 [:v ys]]]}))
+        [[_ _ [_ xs']] [_ _ [_ ys']]] (:vals m)]
+    (is (= (vec xs) (vec xs')))
+    (is (= (vec ys) (vec ys')))
+    (is (= "[D" (.getName (class xs'))))))
+
+(deftest acks
+  (let [{:keys [encode decode]} (c/link)]
+    (is (= {:ack 3 :vals [[0 1 [:v 1]]]} (decode (encode {:ack 3 :vals [[0 1 [:v 1]]]}))))
+    (is (= {:ack 5} (c/combine {:ack 2} {:ack 3})))))

@@ -81,8 +81,8 @@
       (is (= [{:dir :s->c
                :msg {:vals [[0 1 [:s {:degree 50 :grow 0 :shrink 0 :permutation {} :change {}
                                       :patch {7 [:m {:set {:name "seven"}}]}}]]]}}]
-             (map #(dissoc % :bytes) (ct/wire-log p))))
-      (is (<= (ct/bytes-sent p) 20) "single field update payload"))
+             (map #(dissoc % :bytes) (filter #(= :s->c (:dir %)) (ct/wire-log p)))))
+      (is (<= (ct/bytes-sent p :s->c) 20) "single field update payload"))
     (testing "reorder and delete keep surviving child frames"
       (let [before (get @(:children c) 2)]
         (swap! !rows (fn [rs] (vec (reverse (remove #(= 3 (:id %)) rs)))))
@@ -118,7 +118,7 @@
       (is (= 1 (rt/value (:server-root p) 1))))
     (testing "client cannot call into an unknown frame"
       (rt/receive! (:server p) {:call [[1 42 0 []]]})
-      (is (= {:ret [[1 false "frame not mounted"]]} (rt/take-message! (:server p)))))))
+      (is (= [[1 false "frame not mounted"]] (:ret (rt/take-message! (:server p))))))))
 
 (deftest errors-propagate-as-values
   (let [boom (rt/ctor {:name 'boom :nargs 0 :ret 1
@@ -146,3 +146,36 @@
     (rt/run! s)
     (is (= [6 4] (rt/value f 4)))
     (is (= 2 @calls) "one recompute per change, never an inconsistent pair")))
+
+(deftest rate-hint-coalesces-sends
+  (let [clk (curve.clock/virtual-clock)
+        !x (atom 0)
+        c (rt/ctor {:name 'rated :ret 1
+                    :nodes [{:op :const :v !x}
+                            {:op :watch :site :server :in [0] :readers #{:client} :rate 10}]})
+        p (-> (ct/pair :server-opts {:clock clk}) (ct/mount! c) ct/flush!)
+        sends #(count (filter (fn [e] (and (= :s->c (:dir e)) (seq (:vals (:msg e))))) (ct/wire-log p)))]
+    (ct/clear-wire! p)
+    (dotimes [i 5] (reset! !x (inc i)) (ct/flush! p))
+    (is (<= (sends) 1) "at most one send inside the 100 ms window")
+    (curve.clock/advance! clk 100)
+    (ct/flush! p)
+    (is (= 5 (rt/value (:client-root p) 1)) "the latest value arrives after the window")
+    (is (<= (sends) 2))))
+
+(deftest ack-window-backpressure
+  (let [!x (atom 0)
+        server (rt/peer :server :window 1)
+        _ (rt/mount-root! server (simple-ctor !x))
+        _ (rt/run! server)
+        _ (rt/take-message! server)
+        _ (rt/receive! server {:ack 1})]
+    (reset! !x 1) (rt/run! server)
+    (let [m1 (rt/take-message! server)]
+      (is (some? m1))
+      (reset! !x 2) (rt/run! server)
+      (is (nil? (rt/take-message! server)) "window full: nothing more until an ack")
+      (reset! !x 3) (rt/run! server)
+      (rt/receive! server {:ack 1})
+      (let [m2 (rt/take-message! server)]
+        (is (= [[0 1 [:v 3]]] (:vals m2)) "changes made while blocked were coalesced")))))

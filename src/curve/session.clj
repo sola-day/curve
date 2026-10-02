@@ -68,10 +68,12 @@
 
 (defn start!
   "Start a session running ctor (with args) as the root.
-  opts: :send! (fn [bytes]) required; :executor; :on-error; :on-close."
-  [ctor args {:keys [send! executor on-error on-close] :or {executor pool}}]
+  opts: :send! (fn [bytes]) required; :executor; :on-error; :on-close;
+  :window, unacknowledged messages allowed in flight (default 16)."
+  [ctor args {:keys [send! executor on-error on-close window] :or {executor pool window 16}}]
   (let [s-ref (volatile! nil)
         peer (rt/peer :server
+                      :window window
                       :post! (fn [g] (post! @s-ref g))
                       :on-schedule (fn [] (when-let [s @s-ref]
                                             (when-not (.get ^AtomicBoolean (:scheduled s))
