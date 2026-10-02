@@ -1,0 +1,5 @@
+{:builds
+ {:hello {:target :browser
+          :output-dir "examples/hello/resources/public/js"
+          :asset-path "/js"
+          :modules {:main {:init-fn hello.client/init}}}}}

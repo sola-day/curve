@@ -5,3 +5,4 @@ node_modules/
 target/
 resources/public/js/
 *.log
+examples/*/resources/public/js/

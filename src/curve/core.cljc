@@ -32,6 +32,12 @@
      (defmacro watch "Current value of a reference, tracked." [& body] (only-in-reactive &form))
      (defmacro call "(r/call F args...) call a reactive fn held in a value." [& body] (only-in-reactive &form))))
 
+(clojure.core/defn event-value
+  "The value of an input event's target, on either platform."
+  [e]
+  #?(:cljs (if (map? e) (:value e) (.. e -target -value))
+     :clj (or (:value e) (some-> (:target e) :props deref (get "value")))))
+
 (def pending rt/pending)
 (def pending? rt/pending?)
 (def failure? rt/failure?)
