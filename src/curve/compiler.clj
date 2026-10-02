@@ -5,7 +5,8 @@
 
   Strategy: any subform that contains no reactive construct is lifted whole
   into one host fn node whose inputs are the reactive locals it mentions.
-  Only forms that do contain reactive constructs are taken apart.")
+  Only forms that do contain reactive constructs are taken apart."
+  (:require [clojure.string]))
 
 (defonce ^{:doc "Qualified symbols of every reactive fn seen so far."} registry (atom #{}))
 
@@ -42,7 +43,8 @@
 
 ;; ------------------------------------------------------------------ builder
 
-(defn- new-builder [] {:nodes (atom []) :arg-ids (atom []) :captures (atom []) :capture-map (atom {})})
+(defn- new-builder [] {:nodes (atom []) :arg-ids (atom []) :captures (atom []) :capture-map (atom {})
+                        :render (atom nil)})
 
 (defn- add-node! [b nd]
   (let [id (count @(:nodes b))]
@@ -95,10 +97,21 @@
        (or (= 'fn* (first form))
            (contains? '#{clojure.core/fn cljs.core/fn} (head-name env (first form))))))
 
+(defn- hiccup-tail?
+  "Does form (in render position) produce hiccup in a tail position?"
+  [form]
+  (cond
+    (vector? form) (keyword? (first form))
+    (seq? form) (and (not= 'quote (first form))
+                     (not (contains? '#{fn fn* clojure.core/fn} (first form)))
+                     (some hiccup-tail? (rest form)))
+    :else false))
+
 (defn reactive-free?
   "True when form contains no reactive construct and so can run as plain host code."
   [env form]
   (cond
+    (and (:render? env) (hiccup-tail? form)) false
     (seq? form) (cond
                   (= 'quote (first form)) true
                   (fn-form? env form) true
@@ -171,7 +184,7 @@
   {:ctor ctor-map :captures outer-ids}."
   [env params body]
   (let [b (new-builder)
-        env' (assoc env :b b :locals {} :outer env)
+        env' (assoc env :b b :locals {} :outer env :in-element false)
         env' (reduce (fn [e p]
                        (let [id (add-node! b {:op :arg})]
                          (swap! (:arg-ids b) conj id)
@@ -274,15 +287,116 @@
           macro? (compile-form env (host-macroexpand-1 (:menv env) form))
           :else (compile-call env form))))))
 
+(declare compile-element)
+
 (defn compile-form [env form]
   (cond
-    (and (:render? env) (:compile-element env) (vector? form) (keyword? (first form)))
-    ((:compile-element env) env form)
+    (and (:render? env) (vector? form) (keyword? (first form)))
+    (compile-element env form)
     (symbol? form) (if (local-name? env form) (resolve-local env form) (lift env form))
     (literal? form) (const! env form)
     (seq? form) (if (empty? form) (const! env ()) (compile-seq env form))
     (coll? form) (if (reactive-free? env form) (lift env form) (compile-coll env form))
     :else (lift env form)))
+
+;; ------------------------------------------------------------------ templates
+;; A rendered ctor has one static template. Holes are addressed by a path of
+;; child indices from the template roots:
+;;   [:text path id] [:attr path name id static-prefix] [:event path type id]
+;;   [:child path id]   ; comment anchor; child frames render before it
+
+(defn- parse-tag [kw]
+  (let [[_ tag rest] (re-matches #"([^.#]*)(.*)" (name kw))
+        parts (re-seq #"([.#])([^.#]+)" rest)
+        id (some (fn [[_ t v]] (when (= t "#") v)) parts)
+        classes (keep (fn [[_ t v]] (when (= t ".") v)) parts)]
+    [(if (= "" tag) "div" tag)
+     (cond-> {} id (assoc "id" id) (seq classes) (assoc "class" (clojure.string/join " " classes)))]))
+
+(defn- static-value? [v] (or (string? v) (number? v) (keyword? v) (boolean? v) (nil? v)))
+
+(defn- link-node? [env id] (contains? #{:branch :for :mount} (:op (nth @(:nodes (:b env)) id))))
+
+(defn- event-key? [k] (clojure.string/starts-with? (name k) "on-"))
+
+(defn- block
+  "Hiccup nested under let/do inside a template: compile as an inline child ctor."
+  [env form]
+  (let [{:keys [ctor captures]} (compile-child (assoc env :render? true) [] form)
+        t (const! env true)]
+    (add-node! (:b env) {:op :branch :in [t] :ctx-site (:site env) :ctors [ctor] :args [captures]})))
+
+(defn- element-tree [env holes [tag & more] path]
+  (let [[tagname attrs0] (parse-tag tag)
+        [attrs children] (if (map? (first more)) [(first more) (rest more)] [{} more])
+        venv (value-env env)
+        static (reduce-kv
+                 (fn [acc k v]
+                   (let [an (name k)]
+                     (cond
+                       (event-key? k)
+                       (do (swap! holes conj [:event path (subs an 3) (compile-form venv v)]) acc)
+                       (static-value? v)
+                       (cond (or (nil? v) (false? v)) acc
+                             (= "class" an) (update acc "class" #(if % (str % " " (name v)) (name v)))
+                             (true? v) (assoc acc an "")
+                             :else (assoc acc an (if (keyword? v) (name v) (str v))))
+                       :else
+                       (do (swap! holes conj [:attr path an (compile-form venv v)
+                                              (when (= "class" an) (get attrs0 "class"))])
+                           (if (= "class" an) (dissoc acc "class") acc)))))
+                 attrs0 attrs)
+        ;; merge adjacent static text; drop nils
+        kids (reduce (fn [acc c]
+                       (cond
+                         (nil? c) acc
+                         (or (string? c) (number? c))
+                         (if (string? (peek acc)) (conj (pop acc) (str (peek acc) c)) (conj acc (str c)))
+                         :else (conj acc c)))
+                     [] children)
+        out (vec (map-indexed
+                   (fn [i c]
+                     (let [p (conj path i)]
+                       (cond
+                         (string? c) c
+                         (and (vector? c) (keyword? (first c))) (element-tree env holes c p)
+                         :else (let [id (compile-form env c)]
+                                 (swap! holes conj [(if (link-node? env id) :child :text) p id])
+                                 :hole))))
+                   kids))]
+    {:tag tagname :attrs static :children out}))
+
+(defn compile-element [env form]
+  (if (:in-element env)
+    (block env form)
+    (let [holes (atom [])
+          tree (element-tree (assoc env :in-element true :render? true) holes form [0])]
+      (when @(:render (:b env))
+        (error! env form "a reactive fn renders one template"))
+      (reset! (:render (:b env)) {:tree [tree] :holes @holes})
+      (const! env nil))))
+
+(def ^:private void-tags #{"area" "base" "br" "col" "embed" "hr" "img" "input" "link" "meta" "source" "track" "wbr"})
+
+(defn escape-html [s]
+  (-> (str s) (clojure.string/replace "&" "&amp;") (clojure.string/replace "<" "&lt;")
+      (clojure.string/replace ">" "&gt;") (clojure.string/replace "\"" "&quot;")))
+
+(defn tree->html [t]
+  (cond
+    (= :hole t) "<!>"
+    (string? t) (escape-html t)
+    :else (let [{:keys [tag attrs children]} t]
+            (str "<" tag
+                 (apply str (for [[k v] (sort attrs)] (if (= "" v) (str " " k) (str " " k "=\"" (escape-html v) "\""))))
+                 ">"
+                 (when-not (void-tags tag)
+                   (str (apply str (map tree->html children)) "</" tag ">"))))))
+
+(defn- derived-render [b ret]
+  (let [nd (nth @(:nodes b) ret)]
+    {:tree [:hole]
+     :holes [[(if (contains? #{:branch :for :mount} (:op nd)) :child :text) [0] ret]]}))
 
 ;; ------------------------------------------------------------------ readers
 
@@ -331,12 +445,17 @@
 (defn emit-ctor
   "Emit code that builds the runtime ctor for a compiled builder."
   [target {:keys [b ret name site extra]}]
-  (let [nodes (with-readers @(:nodes b))]
+  (let [nodes (with-readers @(:nodes b))
+        render (or @(:render b) (derived-render b ret))]
     `(curve.runtime/ctor
        ~(merge {:name (list 'quote name)
                 :ret ret
                 :arg-ids @(:arg-ids b)
-                :nodes (mapv #(emit-node target %) nodes)}
+                :nodes (mapv #(emit-node target %) nodes)
+                :render (merge {:holes (list 'quote (:holes render))}
+                               (if (= target :cljs)
+                                 {:html (apply str (map tree->html (:tree render)))}
+                                 {:tree (list 'quote (:tree render))}))}
                (when site {:site site})
                extra))))
 
@@ -350,7 +469,7 @@
         site (or (:site opts) :inherit)
         [syms body] (param-binding params body)
         env {:b b :locals {} :outer nil :site site :menv menv :name (symbol (name qname))
-             :render? true :compile-element (:compile-element opts)}
+             :render? true}
         env (reduce (fn [e p]
                       (let [id (add-node! b {:op :arg})]
                         (swap! (:arg-ids b) conj id)

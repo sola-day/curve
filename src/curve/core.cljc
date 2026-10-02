@@ -21,10 +21,7 @@
              site (cond (:server m) :server (:client m) :client)]
          (swap! c/registry conj qname)
          `(def ~(vary-meta name assoc ::reactive true :doc doc)
-            ~(c/compile-defn &env qname params body
-                             {:site site
-                              :compile-element (when-let [f (resolve 'curve.dom-compiler/compile-element)]
-                                                 @f)}))))
+            ~(c/compile-defn &env qname params body {:site site}))))
 
      (clojure.core/defn- only-in-reactive [form]
        (throw (ex-info (str "curve: " (first form) " is only valid inside r/defn") {:form form})))

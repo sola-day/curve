@@ -1,0 +1,68 @@
+(ns curve.mount-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [curve.core :as r]
+            [curve.headless :as h]
+            [curve.mount :as mount]
+            [curve.runtime :as rt]
+            [curve.test :as ct]))
+
+(def !state (atom nil))
+
+(r/defn Item [{:keys [title id]}]
+  [:li {:class (when (= id 2) "two")} title])
+
+(r/defn TodoApp []
+  (let [{:keys [items user]} (r/server (r/watch !state))]
+    [:div.app
+     [:h1 "Hello " user "!"]
+     (if user [:p "logged in"] [:p.anon "anonymous"])
+     [:ul (r/for [it items :by :id] (Item it))]
+     [:button {:on-click (r/server (fn [_] (swap! !state update :items conj {:id 3 :title "c"})))} "add"]]))
+
+(defn render-pair [ctor & args]
+  (let [root (h/root)
+        hooks (mount/renderer (h/dom) root)
+        p (apply ct/mount! (ct/pair :client-opts (dissoc hooks :mounter)) ctor args)]
+    (ct/flush! p)
+    (assoc p :dom-root root :mounter (:mounter hooks))))
+
+(deftest render-update-and-events
+  (reset! !state {:items [{:id 1 :title "a"} {:id 2 :title "b"}] :user "ada"})
+  (let [p (render-pair TodoApp)
+        root (:dom-root p)]
+    (is (= "<div class=\"app\"><h1>Hello ada!</h1><p>logged in</p><ul><li>a</li><li class=\"two\">b</li></ul><button>add</button></div>"
+           (h/html root)))
+    (testing "branch switch"
+      (swap! !state assoc :user nil)
+      (ct/flush! p)
+      (is (= "anonymous" (h/text-content (h/query root "p.anon"))))
+      (is (= "Hello !" (h/text-content (h/query root "h1")))))
+    (testing "event calls a server closure; list grows"
+      (h/fire! (h/query root "button") "click" {})
+      (ct/flush! p)
+      (is (= ["a" "b" "c"] (map h/text-content (h/query-all root "li")))))
+    (testing "reorder and remove keep DOM nodes"
+      (let [li-a (h/query root "li")]
+        (swap! !state update :items (fn [xs] (vec (reverse (remove #(= 2 (:id %)) xs)))))
+        (ct/flush! p)
+        (is (= ["c" "a"] (map h/text-content (h/query-all root "li"))))
+        (is (identical? li-a (second (h/query-all root "li"))))))
+    (testing "unmount removes everything"
+      (rt/unmount-frame! (:client-root p))
+      (is (= "" (h/html root))))))
+
+(r/defn Nested [xs]
+  [:div
+   (let [n (count xs)]
+     [:span "count " n])
+   (r/for [x xs] (if (odd? x) [:b x] (str x)))])
+
+(deftest blocks-and-root-level-anchors
+  (let [p (render-pair Nested [1 2 3])]
+    (is (= "<div><span>count 3</span><b>1</b>2<b>3</b></div>" (h/html (:dom-root p))))))
+
+(r/defn Plain [x] (str "x=" x))
+
+(deftest non-hiccup-ctor-renders-text
+  (let [p (render-pair Plain 5)]
+    (is (= "x=5" (h/html (:dom-root p))))))

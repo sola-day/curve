@@ -40,7 +40,7 @@
 
 (defrecord Frame [peer ctor site parent node key depth seq-id
                   ^objects vals ^objects dirty ^objects subs ^objects exported ^objects sent
-                  children cleanups remote-id alive arg-srcs order watching effects])
+                  children cleanups remote-id alive arg-srcs order watching effects rendered])
 
 (defn kids-seq
   "Child frames of a node: nil, a single frame, or a map key -> frame."
@@ -86,7 +86,25 @@
     (vswap! s conj cb)
     (fn [] (vswap! s disj cb))))
 
-(defn- on-cleanup! [f g] (vswap! (:cleanups f) conj g))
+(defn on-cleanup! [f g] (vswap! (:cleanups f) conj g))
+
+(defn hole-node
+  "Node id a template hole reads: [:text p id] [:child p id] [:attr p name id prefix] [:event p type id]."
+  [[kind _ a b]]
+  (if (contains? #{:attr :event} kind) b a))
+
+(defn child-hole?
+  "Is node i of ctor rendered as a child slot in the ctor's template?"
+  [ctor i]
+  (some #(and (= :child (first %)) (= i (nth % 2))) (:holes (:render ctor))))
+
+(defn ordered-children
+  "Child frames of node i in render order."
+  [f i]
+  (let [k (get @(:children f) i)]
+    (cond (nil? k) nil
+          (instance? Frame k) [k]
+          :else (keep #(get k %) (get @(:order f) i)))))
 
 (declare export! queue-send!)
 
@@ -114,7 +132,7 @@
 
 ;; ---------------------------------------------------------------- mounting
 
-(declare mount-frame! unmount-frame! compute!)
+(declare mount-frame! unmount-frame! compute! bind-child! unbind! apply-val!)
 
 (defn- new-frame [peer ctor site parent node key]
   (let [n (count (:nodes ctor))]
@@ -123,7 +141,8 @@
              (vswap! (:seq peer) inc)
              (object-array n) (object-array n) (object-array n) (object-array n) (object-array n)
              (volatile! {}) (volatile! []) (volatile! nil) (volatile! true)
-             (volatile! {}) (volatile! {}) (volatile! {}) (volatile! {}))))
+             (volatile! {}) (volatile! {}) (volatile! {}) (volatile! {})
+             (volatile! false))))
 
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."
@@ -145,6 +164,9 @@
         nodes (:nodes ctor)]
     (dotimes [i (count nodes)] (aset ^objects (:vals f) i pending))
     (doseq [[k src] (map-indexed vector arg-srcs)] (arg-source f k src))
+    (vreset! (:rendered f) (if parent
+                             (boolean (and @(:rendered parent) (child-hole? (:ctor parent) node)))
+                             (boolean (:render-root? peer))))
     (on-cleanup! f #(doseq [g (vals @(:effects f))] (g)))
     (vswap! (:frames peer) assoc (:seq-id f) f)
     ;; everything computable starts dirty; constants are set directly
@@ -156,7 +178,7 @@
           (aset ^objects (:dirty f) i true))))
     (export! f)
     (when-let [hook (:on-mount peer)] (hook f))
-    (when parent ((:bind-child peer) f))
+    (when parent (bind-child! peer f))
     (schedule-frame! f)
     f))
 
@@ -170,7 +192,7 @@
       (vswap! (:queue peer) dissoc [(:depth f) (:seq-id f)])
       (vswap! (:frames peer) dissoc (:seq-id f))
       (when-let [hook (:on-unmount peer)] (hook f))
-      ((:unbind peer) f))))
+      (unbind! peer f))))
 
 ;; ---------------------------------------------------------------- exports
 
@@ -203,10 +225,15 @@
       :else nil)))
 
 (defn- export! [f]
-  (let [other (other-site (:site (:peer f)))]
+  (let [me (:site (:peer f))
+        other (other-site me)]
     (doseq [[i nd] (map-indexed vector (:nodes (:ctor f)))]
       (when (some #(= other (resolve-site f %)) (:readers nd))
-        (remote-read! f i)))))
+        (remote-read! f i)))
+    ;; a rendered frame's template holes are read by the client
+    (when (and @(:rendered f) (= me :server))
+      (doseq [hole (:holes (:render (:ctor f)))]
+        (when (not= :child (first hole)) (remote-read! f (hole-node hole)))))))
 
 ;; ---------------------------------------------------------------- compute
 
@@ -301,6 +328,7 @@
                            {} (map vector ks items))]
           (vswap! (:children f) assoc i kids)
           (vswap! (:order f) assoc i ks)
+          (when-let [h (:on-children (:peer f))] (h f i))
           (let [rets (mapv #(child-ret-value (kids %)) ks)]
             (or (some #(when (or (pending? %) (failure? %)) %) rets) rets)))))))
 
@@ -430,7 +458,7 @@
   (vreset! (:remote-id f) id)
   (when-let [vs (get @(:stash peer) id)]
     (vswap! (:stash peer) dissoc id)
-    (doseq [[i d] vs] ((:apply-val peer) f i d)))
+    (doseq [[i d] vs] (apply-val! peer f i d)))
   ;; children mounted before we learned our id
   (doseq [[i kids] @(:children f)
           c (kids-seq kids)]
@@ -537,12 +565,10 @@
                   :calls (volatile! {})
                   :call-callbacks (volatile! {})
                   :next-token (volatile! 0)
+                  :render-root? true
                   :post! (fn [g] (g))}
                  opts)]
-    (assoc p
-      :bind-child (fn [c] (bind-child! p c))
-      :unbind (fn [f] (unbind! p f))
-      :apply-val (fn [f i d] (apply-val! p f i d)))))
+    p))
 
 (defn mount-root!
   "Mount ctor as the root frame. args are plain values. The root's default
@@ -551,9 +577,6 @@
   (let [f (mount-frame! peer ctor (or (:site ctor) :client) nil nil nil (mapv (fn [a] [:value a]) args))]
     (bind! peer f 0)
     (vreset! (:remote-id f) 0)
-    ;; the root's value is what the client renders
-    (when (and (= :server (:site peer)) (:ret ctor))
-      (remote-read! f (:ret ctor)))
     f))
 
 (defn frames [peer] (vals @(:frames peer)))
