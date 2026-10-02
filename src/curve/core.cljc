@@ -30,7 +30,11 @@
      (defmacro client "Run body on the client." [& body] (only-in-reactive &form))
      (defmacro for "(r/for [x coll :by key-fn] body) keyed reactive iteration." [& body] (only-in-reactive &form))
      (defmacro watch "Current value of a reference, tracked." [& body] (only-in-reactive &form))
-     (defmacro call "(r/call F args...) call a reactive fn held in a value." [& body] (only-in-reactive &form))))
+     (defmacro call "(r/call F args...) call a reactive fn held in a value." [& body] (only-in-reactive &form))
+     (defmacro shared
+       "(r/shared key body...) a server value computed once per process for
+       each distinct key (and captured values) and followed by every session."
+       [& body] (only-in-reactive &form))))
 
 (clojure.core/defn event-value
   "The value of an input event's target, on either platform."

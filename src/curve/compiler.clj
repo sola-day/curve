@@ -275,6 +275,12 @@
           (= q 'curve.core/watch)
           (let [rid (compile-form (value-env env) (first args))]
             (add-node! (:b env) {:op :watch :site (:site env) :in [rid]}))
+          (= q 'curve.core/shared)
+          (let [[k & body] args
+                senv (assoc env :site :server :render? false)
+                kid (compile-form senv k)
+                {:keys [ctor captures]} (compile-child senv [] (cons 'do body))]
+            (add-node! (:b env) {:op :shared :site :server :in (into [kid] captures) :ctor ctor}))
           (= q 'curve.core/call)
           (let [ids (mapv #(compile-form (value-env env) %) args)]
             (add-node! (:b env) {:op :mount :in ids :ctx-site (:site env)}))
@@ -402,14 +408,14 @@
 
 (defn- reader-inputs [nd]
   (case (:op nd)
-    (:call :watch :effect) (:in nd)
+    (:call :watch :effect :shared) (:in nd)
     (:branch :for) (:in nd)
     :mount (if (:ctor-sym nd) [] (take 1 (:in nd)))
     []))
 
 (defn- reader-sites [nd]
   (case (:op nd)
-    (:call :watch :effect) #{(:site nd)}
+    (:call :watch :effect :shared) #{(:site nd)}
     (:branch :for :mount) #{:client :server}
     #{}))
 
@@ -436,6 +442,7 @@
       :const (assoc base :v (list 'quote (:v nd)))
       (:call :effect) (assoc base :f (when (emit-code? target (:site nd)) (:code nd)))
       :watch base
+      :shared (assoc base :ctor (emit-ctor target (:ctor nd)))
       :branch (cond-> (assoc base :ctors (mapv #(emit-ctor target %) (:ctors nd)) :args (:args nd))
                 (:sel nd) (assoc :sel (:sel nd)))
       :for (assoc base :key (:key nd) :ctor (emit-ctor target (:ctor nd)) :args (:args nd))

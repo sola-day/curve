@@ -176,9 +176,15 @@
 
 (def ^:private D-VAL 0) (def ^:private D-MAP 1) (def ^:private D-SEQ 2)
 (def ^:private D-SET 3) (def ^:private D-PENDING 4) (def ^:private D-ERROR 5) (def ^:private D-FN 6)
+(def ^:private D-RAW 7)
+
+(declare state decoder-state)
 
 (defn- write-delta! [st o [t x]]
   (case t
+    ;; a pre-encoded, self-contained delta (shared values: encoded once,
+    ;; sent to every session as is)
+    :raw (do (put! o D-RAW) (uvarint! o (byte-count x)) (put-bytes! o x))
     :v (do (put! o D-VAL) (write-value! st o x))
     :p (put! o D-PENDING)
     :e (do (put! o D-ERROR) (str! o (str x)))
@@ -213,6 +219,11 @@
       D-PENDING [:p]
       D-ERROR [:e (read-str r)]
       D-FN [:f]
+      D-RAW (let [n (read-uvarint r)
+                  end (+ @(:pos r) n)
+                  d (read-delta (decoder-state) r)]
+              (when-not (= end @(:pos r)) (throw (ex-info "curve.codec: bad raw delta" {})))
+              d)
       D-SET [:t (let [add (read-n r #(read-value st r)) rm (read-n r #(read-value st r))]
                   (cond-> {} (seq add) (assoc :add (set add)) (seq rm) (assoc :remove (set rm))))]
       D-MAP [:m (let [fl (read-uvarint r)
@@ -243,6 +254,14 @@
   [] {:kws (volatile! {})})
 
 (defn decoder-state [] {:kws (volatile! [])})
+
+(defn encode-delta-blob
+  "Encode a delta with no connection state, for reuse across connections."
+  [d]
+  (let [o (new-out)] (write-delta! (state) o d) (out-bytes o)))
+
+(defn decode-delta-blob [bs]
+  (read-delta (decoder-state) {:buf bs :pos (volatile! 0)}))
 
 (defn encode
   "Encode a message map to bytes."

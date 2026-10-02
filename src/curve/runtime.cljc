@@ -23,7 +23,8 @@
   nest (branch, mount, for); a child's identity on both peers is the path
   (parent, node, key), so peers agree without coordination."
   (:refer-clojure :exclude [run!])
-  (:require [curve.delta :as delta]))
+  (:require [curve.codec :as codec]
+            [curve.delta :as delta]))
 
 ;; ---------------------------------------------------------------- values
 
@@ -40,7 +41,7 @@
 
 (defrecord Frame [peer ctor site parent node key depth seq-id
                   ^objects vals ^objects dirty ^objects subs ^objects exported ^objects sent
-                  children cleanups remote-id alive arg-srcs order watching effects rendered])
+                  children cleanups remote-id alive arg-srcs order watching effects rendered shared])
 
 (defn kids-seq
   "Child frames of a node: nil, a single frame, or a map key -> frame."
@@ -142,7 +143,7 @@
              (object-array n) (object-array n) (object-array n) (object-array n) (object-array n)
              (volatile! {}) (volatile! []) (volatile! nil) (volatile! true)
              (volatile! {}) (volatile! {}) (volatile! {}) (volatile! {})
-             (volatile! false))))
+             (volatile! false) (volatile! {}))))
 
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."
@@ -168,6 +169,7 @@
                              (boolean (and @(:rendered parent) (child-hole? (:ctor parent) node)))
                              (boolean (:render-root? peer))))
     (on-cleanup! f #(doseq [g (vals @(:effects f))] (g)))
+    (on-cleanup! f #(doseq [{:keys [release]} (vals @(:shared f))] (release)))
     (vswap! (:frames peer) assoc (:seq-id f) f)
     ;; everything computable starts dirty; constants are set directly
     (dotimes [i (count nodes)]
@@ -357,6 +359,29 @@
           (vswap! (:effects f) assoc i cleanup))
         nil))))
 
+(defn- compute-shared
+  "Server: follow a process-wide shared value (curve.shared), keyed by the
+  ctor, the key value and the captured values."
+  [f i nd]
+  (let [ins (inputs f (:in nd))]
+    (if (or (pending? ins) (failure? ins))
+      ins
+      (let [[k & caps] ins
+            ident [(:name (:ctor nd)) k (vec caps)]
+            cur (get @(:shared f) i)]
+        (when (and cur (not= ident (:ident cur)))
+          ((:release cur))
+          (vswap! (:shared f) dissoc i))
+        (when-not (get @(:shared f) i)
+          (let [peer (:peer f)
+                h ((:shared-acquire peer) (:ctor nd) ident (vec caps)
+                   (fn [] ((:post! peer) #(mark-dirty! f i))))]
+            (vswap! (:shared f) assoc i (assoc h :ident ident))))
+        (let [h (get @(:shared f) i)
+              [v version] ((:current h))]
+          (vswap! (:shared f) assoc-in [i :version] version)
+          v)))))
+
 (defn compute! [f i]
   (let [nd (node-at f i)
         peer (:peer f)
@@ -374,6 +399,7 @@
       :watch (when mine? (set-cell! f i (try (compute-watch f i nd)
                                              (catch #?(:clj Throwable :cljs :default) e (failure e)))))
       :effect (when mine? (set-cell! f i (compute-effect f i nd)))
+      :shared (when mine? (set-cell! f i (compute-shared f i nd)))
       :branch (set-cell! f i (compute-branch f i nd))
       :mount (set-cell! f i (compute-mount f i nd))
       :for (set-cell! f i (compute-for f i nd)))))
@@ -428,9 +454,24 @@
     (or (pending? prev) (failure? prev) (fn? prev) (= prev ::unsent)) [:v v]
     :else (delta/diff prev v)))
 
+(defn- send-shared!
+  "Shared cells remember only the version last sent (a cursor) and send the
+  pre-encoded delta from that version, which every session shares."
+  [f i {:keys [version blob]}]
+  (let [^objects sent (:sent f)
+        s (aget sent i)
+        cursor (when (and (vector? s) (= ::version (first s))) (second s))]
+    (when-not (= cursor version)
+      (when-let [bs (blob cursor version)]
+        (vswap! (:outbox (:peer f)) update :vals (fnil conj []) [(out-id f) i [:raw bs]]))
+      (aset sent i [::version version]))))
+
 (defn- collect-out! [peer]
   (doseq [[f i] (vals @(:dirty-out peer))]
     (when @(:alive f)
+      (if-let [sh (let [sh (get @(:shared f) i) v (value f i)]
+                    (when (and sh (not (pending? v)) (not (failure? v))) sh))]
+        (send-shared! f i sh)
       (let [^objects sent (:sent f)
             prev (let [s (aget sent i)] (cond (nil? s) ::unsent (= s ::nil) nil :else s))
             v (value f i)
@@ -438,7 +479,7 @@
         (when d
           (aset sent i (if (nil? v) ::nil v))
           (let [id (out-id f)]
-            (vswap! (:outbox peer) update :vals (fnil conj []) [id i d]))))))
+            (vswap! (:outbox peer) update :vals (fnil conj []) [id i d])))))))
   (vreset! (:dirty-out peer) (sorted-map)))
 
 (defn take-message!
@@ -504,6 +545,8 @@
               :e (failure (ex-info x {:remote true}))
               :f (remote-proxy peer f i)
               :v x
+              :raw (let [d' (codec/decode-delta-blob x)]
+                     (if (= :v (first d')) (second d') (delta/patch prev d')))
               (delta/patch prev d))]
       (set-cell! f i v))))
 
@@ -570,6 +613,8 @@
                   :call-callbacks (volatile! {})
                   :next-token (volatile! 0)
                   :render-root? true
+                  :shared-acquire #?(:clj (fn [& args] (apply (requiring-resolve 'curve.shared/acquire!) args))
+                                     :cljs (fn [& _] (throw (js/Error. "r/shared runs on the server"))))
                   :post! (fn [g] (g))}
                  opts)]
     p))
