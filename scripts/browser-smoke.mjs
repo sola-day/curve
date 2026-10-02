@@ -67,7 +67,7 @@ process.exit(checks.every((c) => c.ok) ? 0 : 1);
 
 async function defaultSteps(b, check) {
   const q = (sel) => `document.querySelector(${JSON.stringify(sel)})`;
-  check('server value rendered', await b.waitFor(`${q('b.count')}?.textContent !== ''`));
+  check('server value rendered', await b.waitFor(`(${q('b.count')}?.textContent ?? '') !== ''`));
   const before = Number(await b.evaluate(`${q('b.count')}.textContent`));
   await b.evaluate(`${q('#inc')}.click()`);
   check('click round-trips to server', await b.waitFor(`${q('b.count')}.textContent === '${before + 1}'`));
