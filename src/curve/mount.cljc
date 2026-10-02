@@ -68,7 +68,9 @@
         :event (let [[type id] more]
                  (rt/on-cleanup! f (d/listen! dom node type
                                               (fn [e] (let [h (rt/value f id)]
-                                                        (when (fn? h) (h e)))))))
+                                                        (when (fn? h)
+                                                          ;; a server closure gets a serializable event
+                                                          (h (if (rt/remote-fn? h) (d/event-data dom e) e))))))))
         :child (let [[id] more]
                  (vswap! st assoc-in [:anchors id] node)
                  (when (= 1 (count path))

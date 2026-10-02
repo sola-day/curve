@@ -54,24 +54,25 @@
     :b "plain-b"
     "other"))
 
+(def !counter (atom 0))
+
 (r/defn ^:server Counter []
-  (let [!n (atom 0)
-        inc! (fn [] (swap! !n inc))]
-    [(r/watch !n) inc!]))
+  (let [n (r/watch !counter)
+        double (* 2 n)]
+    [n double]))
 
 (deftest case-and-server-default
   (let [p (-> (ct/pair) (ct/mount! Cased :a) ct/flush!)]
     (is (= "server-a" (ret-value (:client-root p)))))
   (let [p (-> (ct/pair) (ct/mount! Cased :zz) ct/flush!)]
     (is (= "other" (ret-value (:client-root p)))))
-  (testing "^:server root: local state and closures live on the server"
-    (let [p (-> (ct/pair) (ct/mount! Counter) ct/flush!)
-          s (:server-root p)
-          [n inc!] (ret-value s)]
-      (is (= 0 n))
-      (inc!)
+  (testing "^:server root: unannotated code runs on the server"
+    (reset! !counter 0)
+    (let [p (-> (ct/pair) (ct/mount! Counter) ct/flush!)]
+      (is (= [0 0] (ret-value (:server-root p))))
+      (swap! !counter inc)
       (ct/flush! p)
-      (is (= 1 (first (ret-value s)))))))
+      (is (= [1 2] (ret-value (:client-root p)))))))
 
 (deftest lifting-keeps-tables-small
   (testing "a plain expression over reactive locals is one node"

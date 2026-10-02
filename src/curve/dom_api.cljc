@@ -13,4 +13,5 @@
   (next-of [d node])
   (set-text! [d node s])
   (set-attr! [d el k v] "v nil removes. value/checked set the property.")
-  (listen! [d el type f] "Returns an unlisten fn."))
+  (listen! [d el type f] "Returns an unlisten fn.")
+  (event-data [d e] "Serializable summary of an event: :type :value :checked :key."))

@@ -62,7 +62,13 @@
       (if (nil? v) (vswap! (:attrs el) dissoc k) (vswap! (:attrs el) assoc k (str v)))))
   (listen! [_ el type f]
     (vswap! (:listeners el) update type (fnil conj #{}) f)
-    (fn [] (vswap! (:listeners el) update type disj f))))
+    (fn [] (vswap! (:listeners el) update type disj f)))
+  (event-data [_ e]
+    (let [t (:target e)]
+      (cond-> {:type (:type e)}
+        (some? (get @(:props t) "value")) (assoc :value (get @(:props t) "value"))
+        (some? (get @(:props t) "checked")) (assoc :checked (get @(:props t) "checked"))
+        (:key e) (assoc :key (:key e))))))
 
 (defn dom [] (->Headless))
 
@@ -126,3 +132,10 @@
         (recur @(:parent x))))))
 
 (defn value [el] (get @(:props el) "value"))
+
+(defn input!
+  "Simulate typing: set the value property and fire input + change."
+  [el v]
+  (vswap! (:props el) assoc "value" v)
+  (fire! el "input" {})
+  (fire! el "change" {}))

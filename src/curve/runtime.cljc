@@ -475,15 +475,19 @@
     (when (identical? f (frame-by-in-id peer id))
       (vswap! (:in-frames peer) dissoc id))))
 
+(defn remote-fn? [g] (boolean (::remote (meta g))))
+
 (defn- remote-proxy [peer f i]
-  (fn [& args]
+  (with-meta
+   (fn [& args]
     (let [token (vswap! (:next-token peer) inc)
           result (volatile! pending)
           id (or @(:remote-id f) (throw (ex-info "curve: remote fn frame unknown" {})))]
       (vswap! (:outbox peer) update :call (fnil conj []) [token id i (vec args)])
       (vswap! (:calls peer) assoc token result)
       (when-let [hook (:on-schedule peer)] (hook))
-      result)))
+      result))
+   {::remote true}))
 
 (defn- authorized-val? [peer f i]
   ;; only accept values for nodes the sender owns

@@ -59,6 +59,12 @@
             id (gensym)]
         (delegate! type)
         (unchecked-set el k (assoc (or (unchecked-get el k) {}) id f))
-        #(unchecked-set el k (dissoc (unchecked-get el k) id))))))
+        #(unchecked-set el k (dissoc (unchecked-get el k) id)))))
+  (event-data [_ e]
+    (let [t (.-target e)]
+      (cond-> {:type (.-type e)}
+        (and t (some? (.-value t))) (assoc :value (.-value t))
+        (and t (= "checkbox" (.-type t))) (assoc :checked (.-checked t))
+        (.-key e) (assoc :key (.-key e))))))
 
 (defn dom [] (BrowserDom.))

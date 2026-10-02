@@ -80,9 +80,9 @@
     (testing "only the changed field crosses the wire"
       (is (= [{:dir :s->c
                :msg {:vals [[0 1 [:s {:degree 50 :grow 0 :shrink 0 :permutation {} :change {}
-                                      :patch {7 [:m {:set {:name "seven"}}]}}]]]}
-               :bytes nil}]
-             (ct/wire-log p))))
+                                      :patch {7 [:m {:set {:name "seven"}}]}}]]]}}]
+             (map #(dissoc % :bytes) (ct/wire-log p))))
+      (is (<= (ct/bytes-sent p) 20) "single field update payload"))
     (testing "reorder and delete keep surviving child frames"
       (let [before (get @(:children c) 2)]
         (swap! !rows (fn [rs] (vec (reverse (remove #(= 3 (:id %)) rs)))))

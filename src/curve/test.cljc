@@ -2,18 +2,17 @@
   "Headless two-peer harness. Client and server peers run in one process and
   talk through the real message path, so tests can assert on what crossed
   the wire. Not part of any production bundle."
-  (:require [curve.runtime :as rt]))
-
-(defn- default-codec [m] m)
+  (:require [curve.codec :as codec]
+            [curve.runtime :as rt]))
 
 (defn pair
-  "Connect a client and a server peer in-process.
-  opts: :codec fn applied to every message (e.g. encode+decode roundtrip),
-        :size fn message -> byte count for wire accounting."
-  [& {:keys [codec size client-opts server-opts] :or {codec default-codec}}]
+  "Connect a client and a server peer in-process. Messages go through the
+  binary codec (a link per direction) unless :binary? false."
+  [& {:keys [binary? client-opts server-opts] :or {binary? true}}]
   (let [client (apply rt/peer :client (mapcat identity client-opts))
         server (apply rt/peer :server (mapcat identity server-opts))]
-    {:client client :server server :codec codec :size size
+    {:client client :server server :binary? binary?
+     :links {:s->c (codec/link) :c->s (codec/link)}
      :wire (atom [])}))
 
 (defn mount!
@@ -23,12 +22,16 @@
     :client-root (apply rt/mount-root! client ctor args)
     :server-root (apply rt/mount-root! server ctor args)))
 
-(defn- deliver! [{:keys [codec wire size]} from to dir]
+(defn- deliver! [{:keys [binary? links wire]} from to dir]
   (when-let [m (rt/take-message! from)]
-    (let [m' (codec m)]
-      (swap! wire conj {:dir dir :msg m :bytes (when size (size m))})
-      (rt/receive! to m')
-      true)))
+    (if binary?
+      (let [{:keys [encode decode]} (get links dir)
+            bs (encode m)]
+        (swap! wire conj {:dir dir :msg m :bytes (codec/byte-count bs)})
+        (rt/receive! to (decode bs)))
+      (do (swap! wire conj {:dir dir :msg m})
+          (rt/receive! to m)))
+    true))
 
 (defn flush!
   "Run both peers and exchange messages until nothing is left to do."

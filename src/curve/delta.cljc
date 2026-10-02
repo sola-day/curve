@@ -76,6 +76,6 @@
              m (reduce clojure.core/dissoc a dissoc)
              m (reduce-kv assoc m set)]
          (reduce-kv (fn [m k d] (assoc m k (curve.delta/patch (get m k) d))) m patch))
-    :s (let [v (s/patch a (clojure.core/dissoc x :patch))]
+    :s (let [v (s/patch a (-> x (clojure.core/dissoc :patch) (update :degree #(or % (count a)))))]
          (reduce-kv (fn [v i d] (assoc v i (curve.delta/patch (nth v i) d))) v (:patch x)))
     :t (-> (reduce disj a (:remove x)) (into (:add x)))))
