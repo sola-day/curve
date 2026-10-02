@@ -1,0 +1,7 @@
+.jj/
+.cpcache/
+.shadow-cljs/
+node_modules/
+target/
+resources/public/js/
+*.log
