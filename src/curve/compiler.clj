@@ -707,6 +707,24 @@
       :mount (cond-> base (:ctor-sym nd) (assoc :ctor-fn `(fn [] ~(:ctor-sym nd))))
       (merge base (dissoc nd :b)))))
 
+(defn- normalize
+  "A form as both builds see it: no core namespace prefixes, gensyms
+  replaced by a placeholder. Stable ids must agree between the JVM and
+  browser compilations of the same source."
+  [form]
+  (clojure.walk/postwalk
+    (fn [x]
+      (if (symbol? x)
+        (let [n (name x) ns (namespace x)]
+          (cond
+            (or (re-find #"__\d+__auto__$" n) (re-find #"^(G__|p__|map__|vec__|seq__|first__)\d+$" n)
+                (re-find #"^[a-z!]\d{3,}$" n) (re-find #"_\d{3,}$" n))
+            '_g
+            (contains? #{"clojure.core" "cljs.core"} ns) (symbol n)
+            :else x))
+        x))
+    form))
+
 (defn- with-sids
   "Stable node ids: a hash of what the node computes and of its inputs' ids,
   so an unchanged subexpression keeps its id when the function around it is
@@ -714,7 +732,7 @@
   [ctor-name nodes]
   (let [seen (volatile! {})]
     (reduce (fn [acc nd]
-              (let [base (hash [(:op nd) (pr-str (or (:form nd) (:v nd) (:var nd) (:code nd)))
+              (let [base (hash [(:op nd) (pr-str (normalize (or (:form nd) (:v nd) (:var nd) (:code nd))))
                                 (mapv #(:sid (nth acc %)) (:in nd))
                                 (when (= :arg (:op nd)) (count acc))])
                     n (get @seen base 0)

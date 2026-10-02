@@ -88,6 +88,19 @@
         (swap! (:stats s) update :bytes-out + n)
         ((:send! s) bs)))))
 
+(defn detach!
+  "Keep the session running but hold outgoing messages (between a server
+  render and the browser's connection)."
+  [s]
+  (reset! (:sink s) {:buffer []}))
+
+(defn attach!
+  "Give the session a live connection; held messages go first."
+  [s send!]
+  (let [{:keys [buffer]} (first (swap-vals! (:sink s) (constantly {:send! send!})))]
+    (doseq [bs buffer] (send! bs))
+    (post! s (fn []))))
+
 (defn- check-budget! [s turn-ms]
   (let [{:keys [max-nodes max-turn-ms max-strikes]} (:budget s)
         nodes (:nodes @(:stats s))]
@@ -135,6 +148,7 @@
   :window, unacknowledged messages allowed in flight (default 16)."
   [ctor args {:keys [send! executor on-error on-close window budget] :or {executor pool window 16}}]
   (let [s-ref (volatile! nil)
+        sink (atom {:send! send!})
         stats (atom {:nodes 0 :bytes-out 0 :turns 0 :strikes 0})
         peer (rt/peer :server
                       :window window
@@ -147,8 +161,12 @@
         link-out (codec/link)
         link-in (codec/link)
         s {:peer peer :tasks (ConcurrentLinkedQueue.) :scheduled (AtomicBoolean. false)
-           :executor executor :send! send! :on-error on-error :on-close on-close
+           :executor executor :on-error on-error :on-close on-close
+           :sink sink
+           :send! (fn [bs] (let [{f :send!} @sink]
+                             (if f (f bs) (swap! sink update :buffer (fnil conj []) bs))))
            :encode (:encode link-out) :decode (:decode link-in)
+           :codec-out (:enc link-out) :codec-in (:dec link-in)
            :root (volatile! nil) :open (atom true)
            :stats stats :budget (merge default-budget budget)
            :bw (atom {:start (System/currentTimeMillis) :bytes 0 :over-since nil})

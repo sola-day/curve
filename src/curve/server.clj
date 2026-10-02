@@ -20,13 +20,18 @@
   [ctor & {:keys [args-fn on-error] :or {args-fn (constantly [])}}]
   (fn [request]
     (if (ws/upgrade-request? request)
-      (let [s (atom nil)]
+      (let [s (atom nil)
+            token (second (re-find #"(?:^|&)resume=([^&]+)" (or (:query-string request) "")))]
         {::ws/listener
          {:on-open (fn [socket]
-                     (reset! s (session/start! ctor (args-fn request)
-                                               {:send! (fn [^bytes bs] (ws/send socket (ByteBuffer/wrap bs)))
-                                                :on-error on-error
-                                                :on-close #(try (ws/close socket) (catch Exception _ nil))})))
+                     (let [send! (fn [^bytes bs] (ws/send socket (ByteBuffer/wrap bs)))]
+                       (if-let [resumed (when token ((requiring-resolve 'curve.ssr/take-detached!) token))]
+                         ;; continue the session a server render started
+                         (do (reset! s resumed) (session/attach! resumed send!))
+                         (reset! s (session/start! ctor (args-fn request)
+                                                   {:send! send!
+                                                    :on-error on-error
+                                                    :on-close #(try (ws/close socket) (catch Exception _ nil))})))))
           :on-message (fn [_ msg] (session/receive! @s (buffer->bytes msg)))
           :on-close (fn [_ _ _] (some-> @s session/close!))
           :on-error (fn [_ e] (when on-error (on-error e)) (some-> @s session/close!))}})

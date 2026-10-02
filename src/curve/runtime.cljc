@@ -218,7 +218,7 @@
 
 ;; ---------------------------------------------------------------- mounting
 
-(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of)
+(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of revive resume-wire!)
 
 (def ^:private no-holes (object-array 0))
 
@@ -303,15 +303,27 @@
     (vswap! (:frames peer) assoc (:seq-id f) f)
     ;; everything computable starts dirty; constants are set directly; local
     ;; state carried over by a hot reload is seeded by stable id
-    (let [state (:state @(:seed f))]
+    (let [seed @(:seed f)
+          state (:state seed)
+          resumed (:vals seed)]
       (dotimes [i (count nodes)]
-        (let [nd (nth nodes i)]
+        (let [nd (nth nodes i)
+              sid (:sid nd)]
           (case (:op nd)
             :arg nil
             :const (aset ^objects (:vals f) i (:v nd))
-            (if (and state (contains? state (:sid nd)))
-              (aset ^objects (:vals f) i (get state (:sid nd)))
-              (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true))))))
+            (cond
+              (and state (contains? state sid))
+              (aset ^objects (:vals f) i (get state sid))
+              ;; resuming a server render: take the value, unless the node
+              ;; must run to (re)build children, subscriptions or effects
+              (and resumed (contains? resumed sid)
+                   (or (= (node-site f nd) (other-site (:site peer))) ; computed by the other peer
+                       (not (contains? #{:branch :for :mount :watch :effect :shared :dyn} (:op nd)))))
+              (aset ^objects (:vals f) i (revive peer f i (get resumed sid)))
+              :else
+              (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true)))))
+      (when resumed (resume-wire! peer f seed)))
     (export! f)
     (when-let [hook (:on-mount peer)] (hook f))
     (when parent (bind-child! peer f))
@@ -974,6 +986,86 @@
     f))
 
 (defn frames [peer] (vals @(:frames peer)))
+
+;; ---- resuming a server render (design §7.3, §8.3)
+;; A server render runs a headless client peer next to a real session. Its
+;; state (values, wire ids, codec tables) is exported here and restored in the
+;; browser, which then continues the same session: no query runs twice.
+
+(defn- portable
+  "v as snapshot data, or ::skip when it cannot travel (it will be recomputed)."
+  [v]
+  (cond
+    (or (pending? v) (failure? v)) ::skip
+    (remote-fn? v) {::proxy true}
+    (fn? v) ::skip
+    (ctor? v) {::ctor (:name v)}
+    (instance? #?(:clj clojure.lang.Atom :cljs cljs.core/Atom) v)
+    (let [x (portable @v)] (if (= x ::skip) ::skip {::atom x}))
+    :else (if (try (codec/encode-delta-blob [:v v]) true (catch #?(:clj Exception :cljs :default) _ false))
+            v
+            ::skip)))
+
+(defn- revive [peer f i x]
+  (cond
+    (and (map? x) (contains? x ::proxy)) (remote-proxy peer f i)
+    (and (map? x) (contains? x ::ctor)) (ctor-by-name (::ctor x))
+    (and (map? x) (contains? x ::atom)) (atom (::atom x))
+    :else x))
+
+(defn- frame-resume-snapshot [f]
+  (let [peer (:peer f)
+        nodes (:nodes (:ctor f))
+        portable-map (fn [arr]
+                       (into {} (keep (fn [i] (let [x (portable (aget ^objects arr i))]
+                                                (when-not (= x ::skip) [(:sid (nth nodes i)) x])))
+                                      (range (count nodes)))))]
+    {:vals (portable-map (:vals f))
+     :sent (into {} (keep (fn [i] (let [s (aget ^objects (:sent f) i)]
+                                    (when (some? s)
+                                      (let [x (if (= s ::nil) nil (portable s))]
+                                        (when-not (= x ::skip) [(:sid (nth nodes i)) x])))))
+                          (range (count nodes))))
+     :remote-id @(:remote-id f)
+     :out-id (get @(:out-ids peer) (:seq-id f))
+     :kids (into {} (for [[i kids] @(:children f)
+                          c (kids-seq kids)]
+                      [[(:sid (nth nodes i)) (:key c)] (frame-resume-snapshot c)]))}))
+
+(defn resume-snapshot
+  "Everything a browser needs to continue this (client) peer's session."
+  [peer]
+  (let [root (first (filter #(nil? (:parent %)) (frames peer)))]
+    {:root (frame-resume-snapshot root)
+     :next-wire-id @(:next-wire-id peer)
+     :decls @(:decls peer)}))
+
+(defn- resume-wire!
+  "Re-establish a resumed frame's wire identity on both directions."
+  [peer f {:keys [remote-id out-id sent]}]
+  (let [nodes (:nodes (:ctor f))
+        by-sid (into {} (map-indexed (fn [i nd] [(:sid nd) i]) nodes))]
+    (doseq [[sid x] sent]
+      (when-let [i (by-sid sid)]
+        (aset ^objects (:sent f) i (if (nil? x) ::nil (revive peer f i x)))))
+    (when (and remote-id (:parent f)) (bind! peer f remote-id))
+    (when (and out-id (:parent f))
+      (vswap! (:out-ids peer) assoc (:seq-id f) out-id)
+      (vswap! (:out-frames peer) assoc out-id f)
+      (on-cleanup! f (fn []
+                       (vswap! (:out-ids peer) dissoc (:seq-id f))
+                       (vswap! (:out-frames peer) dissoc out-id)
+                       (vswap! (:outbox peer) update :drop (fnil conj []) out-id))))))
+
+(defn resume!
+  "Restore a client peer from resume-snapshot and mount ctor with it."
+  [peer ctor {:keys [root next-wire-id decls]}]
+  (vreset! (:next-wire-id peer) next-wire-id)
+  (vreset! (:decls peer) decls)
+  (vreset! (:root-seed peer) root)
+  (let [f (mount-root! peer ctor)]
+    (vreset! (:root-seed peer) nil)
+    f))
 
 ;; ---- hot reload
 

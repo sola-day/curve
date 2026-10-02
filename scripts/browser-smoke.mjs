@@ -56,6 +56,7 @@ const check = (name, ok, detail) => { checks.push({ name, ok }); console.log(`${
 try {
   const b = await connect();
   await b.send('Page.navigate', { url });
+  await b.waitFor(`document.documentElement.dataset.curve === 'ready'`, 10000);
   const steps = process.argv[3] ? (await import(process.argv[3])).default : defaultSteps;
   await steps(b, check);
   if (b.logs.length) console.log('console:', b.logs.join('\n'));

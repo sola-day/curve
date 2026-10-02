@@ -352,4 +352,13 @@
   returns {:encode f :decode f}."
   []
   (let [enc (state) dec (decoder-state)]
-    {:encode #(encode enc %) :decode #(decode dec %)}))
+    {:encode #(encode enc %) :decode #(decode dec %) :enc enc :dec dec}))
+
+(defn export-state
+  "Plain data for a codec state (keyword and shape tables), to resume a
+  connection elsewhere."
+  [st]
+  {:kws @(:kws st) :shapes @(:shapes st)})
+
+(defn import-state [{:keys [kws shapes]}]
+  {:kws (volatile! kws) :shapes (volatile! shapes)})
