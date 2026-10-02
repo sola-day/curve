@@ -15,7 +15,9 @@
 (defn text [s] (let [n (node :text {})] (vreset! (:text n) s) n))
 (defn comment-node [] (node :comment {}))
 
-(defn- index-of [v x] (first (keep-indexed (fn [i y] (when (identical? x y) i)) v)))
+(defn- index-of [v x]
+  (let [n (count v)]
+    (loop [i 0] (cond (= i n) nil (identical? x (nth v i)) i :else (recur (inc i))))))
 
 (defn- detach! [n]
   (when-let [p @(:parent n)]

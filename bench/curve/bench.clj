@@ -117,12 +117,12 @@
     (assoc p :dom-root root)))
 
 (defn bench-table []
-  (let [create-ns (measure 20 #(do (reset! !rows (rows 1000))
+  (let [create-ns (measure 10 #(do (reset! !rows (rows 1000))
                                    (let [p (render-pair)] (ct/flush! p)
                                      (rt/unmount-frame! (:client-root p)) (rt/unmount-frame! (:server-root p)))))
         p (do (reset! !rows (rows 1000)) (ct/flush! (render-pair)))
         i (atom 0)
-        update-ns (measure 200 #(do (swap! !rows assoc-in [500 :name] (str "n" (swap! i inc))) (ct/flush! p)))
+        update-ns (measure 100 #(do (swap! !rows assoc-in [500 :name] (str "n" (swap! i inc))) (ct/flush! p)))
         _ (ct/clear-wire! p)
         _ (do (swap! !rows assoc-in [500 :name] "x") (ct/flush! p))
         bytes (ct/bytes-sent p)]
@@ -136,8 +136,13 @@
 (r/defn SharedTable []
   [:table (r/for [row (r/shared ::rows (r/watch !rows)) :by :id] (Row row))])
 
+(defn per-session-query
+  "What a per-session database query returns: fresh maps, no sharing."
+  [rows]
+  (mapv #(into {} %) rows))
+
 (r/defn PrivateTable []
-  [:table (r/for [row (r/server (r/watch !rows)) :by :id] (Row row))])
+  [:table (r/for [row (r/server (per-session-query (r/watch !rows))) :by :id] (Row row))])
 
 (defn- heap []
   (dotimes [_ 3] (System/gc) (Thread/sleep 100))
@@ -160,9 +165,10 @@
    :shared-bytes-per-session (sessions-bytes SharedTable 1000)
    :private-bytes-per-session (sessions-bytes PrivateTable 1000)})
 
-(defn -main [& _]
-  (println "A. interpreter overhead:" (bench-interpreter))
-  (println "B/C. 1000-row table:" (bench-table))
+(defn -main [& args]
+  (when-not (= ["sessions"] args)
+    (println "A. interpreter overhead:" (bench-interpreter))
+    (println "B/C. 1000-row table:" (bench-table)))
   (println "D. 1000 sessions on one 1000-row table:" (bench-sessions))
   (shutdown-agents)
   (System/exit 0))

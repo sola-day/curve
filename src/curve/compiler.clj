@@ -6,7 +6,8 @@
   Strategy: any subform that contains no reactive construct is lifted whole
   into one host fn node whose inputs are the reactive locals it mentions.
   Only forms that do contain reactive constructs are taken apart."
-  (:require [clojure.string]))
+  (:require [clojure.string]
+            [clojure.walk]))
 
 (defonce ^{:doc "Qualified symbols of every reactive fn seen so far."} registry (atom #{}))
 
@@ -25,7 +26,7 @@
         (if expander
           {:name (symbol expander) :macro true}
           (when-let [v ((requiring-resolve 'cljs.analyzer.api/resolve) menv sym)]
-            {:name (:name v)}))))))
+            {:name (:name v) :dynamic (boolean (:dynamic v))}))))))
 
 (defn- host-resolve
   "{:name qualified-sym :macro bool} for a global symbol, nil for host locals
@@ -35,7 +36,8 @@
     (when-not (contains? (:locals menv) sym) (cljs-resolve menv sym))
     (when-not (contains? menv sym)
       (let [v (try (resolve sym) (catch Exception _ nil))]
-        (when (var? v) {:name (symbol v) :macro (boolean (:macro (meta v)))})))))
+        (when (var? v) {:name (symbol v) :macro (boolean (:macro (meta v)))
+                        :dynamic (boolean (:dynamic (meta v)))})))))
 
 (defn- host-macroexpand-1 [menv form]
   (if (cljs? menv)
@@ -49,23 +51,44 @@
 ;; ------------------------------------------------------------------ builder
 
 (defn- new-builder [] {:nodes (atom []) :arg-ids (atom []) :captures (atom []) :capture-map (atom {})
-                        :render (atom nil)})
+                        :render (atom nil) :dyn-map (atom {})})
 
 (defn- add-node! [b nd]
   (let [id (count @(:nodes b))]
     (swap! (:nodes b) conj nd)
     id))
 
-(defn- local-name? [env sym]
+(defn- lexical? [env sym]
   (and (symbol? sym) (nil? (namespace sym))
        (or (contains? (:locals env) sym)
            (contains? @(:capture-map (:b env)) sym)
-           (boolean (when-let [o (:outer env)] (local-name? o sym))))))
+           (boolean (when-let [o (:outer env)] (lexical? o sym))))))
+
+(defn- dyn-var
+  "Qualified name when sym is a dynamic var (not shadowed by a local)."
+  [env sym]
+  (when (and (symbol? sym) (not (lexical? env sym)) (not (contains? (:menv env) sym))
+             (re-find #"^\*.+\*$" (name sym)))
+    (let [{:keys [name dynamic]} (host-resolve (:menv env) sym)]
+      (when dynamic name))))
+
+(defn- local-name?
+  "Reactive locals, plus dynamic vars: reading one inside reactive code
+  follows the nearest enclosing r/binding."
+  [env sym]
+  (or (lexical? env sym) (boolean (dyn-var env sym))))
 
 (defn- resolve-local
   "Node id of a reactive local; captures it from enclosing ctors as needed."
   [env sym]
-  (or (get (:locals env) sym)
+  (or (when-not (lexical? env sym)
+        (when-let [q (dyn-var env sym)]
+          (let [b (:b env)]
+            (or (get @(:dyn-map b) q)
+                (let [id (add-node! b {:op :dyn :var q :default `(fn [] ~sym)})]
+                  (swap! (:dyn-map b) assoc q id)
+                  id)))))
+      (get (:locals env) sym)
       (get @(:capture-map (:b env)) sym)
       (when-let [o (:outer env)]
         (when-let [outer-id (resolve-local o sym)]
@@ -87,7 +110,8 @@
 (def reactive-specials
   '#{curve.core/server curve.core/client curve.core/for curve.core/watch curve.core/call
      curve.core/mutation curve.core/effect curve.core/suspense curve.core/boundary
-     curve.core/binding curve.core/shared curve.core/offload curve.core/flow})
+     curve.core/binding curve.core/shared curve.core/offload curve.core/flow
+     curve.core/-with-env})
 
 (defn- head-name [env h]
   (when (and (symbol? h) (not (local-name? env h)) (not (special-forms h)))
@@ -152,9 +176,13 @@
   (if (literal? form)
     (const! env form)
     (let [syms (free-locals env form)
-          ids (mapv #(resolve-local env %) syms)]
+          ids (mapv #(resolve-local env %) syms)
+          ;; a qualified dynamic var cannot be a param name: substitute
+          renames (into {} (keep (fn [s] (when (namespace s) [s (gensym (str (name s) "_"))]))) syms)
+          params (mapv #(get renames % %) syms)
+          body (if (seq renames) (clojure.walk/postwalk-replace renames form) form)]
       (add-node! (:b env) {:op :call :site (:site env)
-                           :code `(fn [~@syms] ~form) :in ids :form form}))))
+                           :code `(fn [~@params] ~body) :in ids :form form}))))
 
 (defn- value-env [env] (assoc env :render? false))
 
@@ -252,6 +280,50 @@
     (add-node! (:b env) {:op :for :in [cid] :key (or kf `identity) :ctx-site (:site env)
                          :ctor ctor :args captures})))
 
+(defn- compile-with-bind
+  "Compile body as an inline child whose env gains {key node-id} entries."
+  [env bind body]
+  (let [{:keys [ctor captures]} (compile-child env [] (cons 'do body))
+        t (const! env true)]
+    (add-node! (:b env) {:op :branch :in [t] :ctx-site (:site env) :ctors [ctor] :args [captures]
+                         :bind bind})))
+
+(defn- rewrite
+  "Reactive forms that are compositions of other reactive forms."
+  [q [_ & args :as form]]
+  (case q
+    curve.core/boundary
+    (let [[[_ [err retry] & fallback] & body] args]
+      `(let [!err# (curve.core/client (atom nil))
+             err# (curve.core/watch !err#)]
+         (if (some? err#)
+           (let [~err err# ~retry (fn [] (reset! !err# nil))] ~@fallback)
+           (curve.core/-with-env {:curve.runtime/boundary !err#} ~@body))))
+
+    curve.core/suspense
+    (let [[fallback & body] args]
+      `(let [!n# (curve.core/client (atom 0))
+             n# (curve.core/watch !n#)]
+         [:div.curve-suspense {:style {:display "contents"}}
+          (when (pos? n#) ~fallback)
+          [:div {:style {:display (if (pos? n#) "none" "contents")}}
+           (curve.core/-with-env {:curve.runtime/suspense !n#} ~@body)]]))
+
+    curve.core/flow
+    (let [[subscribe] args]
+      `(let [!v# (atom curve.runtime/pending)]
+         (curve.core/effect (~subscribe (fn [x#] (reset! !v# x#))))
+         (curve.core/watch !v#)))
+
+    curve.core/offload
+    `(curve.core/server
+       (curve.core/flow (fn [emit#] (curve.runtime/offload! (fn [] ~@args) emit#))))
+
+    curve.core/mutation
+    (let [[f] args]
+      `(let [g# (curve.core/server ~f)]
+         (fn [& args#] (curve.core/-mutate g# args#))))))
+
 (defn- compile-seq [env form]
   (let [[h & args] form]
     (cond
@@ -283,6 +355,31 @@
           (= q 'curve.core/watch)
           (let [rid (compile-form (value-env env) (first args))]
             (add-node! (:b env) {:op :watch :site (:site env) :in [rid]}))
+          (contains? '#{curve.core/boundary curve.core/suspense curve.core/flow
+                        curve.core/offload curve.core/mutation} q)
+          (compile-form env (rewrite q form))
+          (= q 'curve.core/binding)
+          (let [[bindings & body] args
+                venv (value-env env)
+                bind (into {} (for [[sym e] (partition 2 bindings)]
+                                [(or (:name (host-resolve (:menv env) sym))
+                                     (error! env form (str "r/binding: cannot resolve " sym)))
+                                 (compile-form venv e)]))]
+            (compile-with-bind env bind body))
+          (= q 'curve.core/-with-env)
+          (let [[m & body] args
+                venv (value-env env)
+                bind (into {} (for [[k e] m] [k (compile-form venv e)]))]
+            (compile-with-bind env bind body))
+          (= q 'curve.core/effect)
+          (let [form' (cons 'do args)
+                syms (free-locals env form')
+                ids (mapv #(resolve-local env %) syms)
+                renames (into {} (keep (fn [s] (when (namespace s) [s (gensym)]))) syms)]
+            (add-node! (:b env) {:op :effect :site (:site env)
+                                 :code `(fn [~@(mapv #(get renames % %) syms)]
+                                          ~(clojure.walk/postwalk-replace renames form'))
+                                 :in ids}))
           (= q 'curve.core/shared)
           (let [[k & body] args
                 senv (assoc env :site :server :render? false)
@@ -452,7 +549,9 @@
       :watch base
       :shared (assoc base :ctor (emit-ctor target (:ctor nd)))
       :branch (cond-> (assoc base :ctors (mapv #(emit-ctor target %) (:ctors nd)) :args (:args nd))
-                (:sel nd) (assoc :sel (:sel nd)))
+                (:sel nd) (assoc :sel (:sel nd))
+                (:bind nd) (assoc :bind (list 'quote (:bind nd))))
+      :dyn (assoc base :var (list 'quote (:var nd)) :default (:default nd))
       :for (assoc base :key (:key nd) :ctor (emit-ctor target (:ctor nd)) :args (:args nd))
       :mount (cond-> base (:ctor-sym nd) (assoc :ctor-fn `(fn [] ~(:ctor-sym nd))))
       (merge base (dissoc nd :b)))))

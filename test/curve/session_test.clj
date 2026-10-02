@@ -67,11 +67,16 @@
         (Thread/sleep 50)
         (is (< (count (.getWatches ^clojure.lang.IRef !board)) watches-before))))))
 
-(deftest failing-session-is-isolated
-  (let [boom (rt/ctor {:name 'boom :nargs 0 :ret nil
-                       :nodes [{:op :effect :site :server :f (fn [] (throw (ex-info "bad" {}))) :in []}]})
-        errors (atom [])
-        s (session/start! boom [] {:send! (fn [_]) :on-error #(swap! errors conj %)})]
+(deftest malformed-input-closes-only-that-session
+  (reset! !board {:title "board" :votes 0})
+  (let [errors (atom [])
+        bad (session/start! Board [] {:send! (fn [_]) :on-error #(swap! errors conj %)})
+        good (pump! (connect Board))]
+    (session/receive! bad (byte-array [2 1 9 9 99]))
     (Thread/sleep 100)
     (is (= 1 (count @errors)))
-    (is (false? @(:open s)))))
+    (is (false? @(:open bad)))
+    (is @(:open (:session good)))
+    (swap! !board update :votes inc)
+    (pump! good)
+    (is (= "1" (h/text-content (h/query (:root good) ".votes"))))))

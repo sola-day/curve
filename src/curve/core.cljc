@@ -31,6 +31,14 @@
      (defmacro for "(r/for [x coll :by key-fn] body) keyed reactive iteration." [& body] (only-in-reactive &form))
      (defmacro watch "Current value of a reference, tracked." [& body] (only-in-reactive &form))
      (defmacro call "(r/call F args...) call a reactive fn held in a value." [& body] (only-in-reactive &form))
+     (defmacro binding "(r/binding [*v* expr ...] body) dynamic scope that follows reactive calls across sites." [& body] (only-in-reactive &form))
+     (defmacro effect "(r/effect body) side effect re-run when its inputs change; a returned fn is its cleanup." [& body] (only-in-reactive &form))
+     (defmacro flow "(r/flow (fn [emit!] ... cleanup)) a value pushed by an external source." [& body] (only-in-reactive &form))
+     (defmacro offload "(r/offload body) run blocking server code off the session's turn; pending until done." [& body] (only-in-reactive &form))
+     (defmacro mutation "(r/mutation f) a client handler calling server fn f with the event's value." [& body] (only-in-reactive &form))
+     (defmacro boundary "(r/boundary (fn [err retry] fallback) body) show fallback when body fails." [& body] (only-in-reactive &form))
+     (defmacro suspense "(r/suspense fallback body) show fallback while body has pending values." [& body] (only-in-reactive &form))
+     (defmacro -with-env [& body] (only-in-reactive &form))
      (defmacro shared
        "(r/shared key body...) a server value computed once per process for
        each distinct key (and captured values) and followed by every session."
@@ -52,6 +60,14 @@
   [e]
   #?(:cljs (if (map? e) (:checked e) (.. e -target -checked))
      :clj (boolean (or (:checked e) (some-> (:target e) :props deref (get "checked"))))))
+
+(clojure.core/defn -mutate
+  "Call server fn g; a single DOM event argument is replaced by its value."
+  [g args]
+  (let [[a & more] args
+        event? #?(:cljs (and (some? a) (instance? js/Event a))
+                  :clj (and (map? a) (contains? a :target)))]
+    (apply g (if (and event? (empty? more)) [(event-value a)] args))))
 
 (def pending rt/pending)
 (def pending? rt/pending?)

@@ -36,6 +36,10 @@
 (defn failure? [x] (instance? Failure x))
 (defn failure [e] (->Failure e))
 
+#?(:clj
+   (defmacro guarded [& body]
+     `(try ~@body (catch ~(if (:ns &env) :default 'Throwable) e# (curve.runtime/failure e#)))))
+
 (defn other-site [s] (case s :client :server :server :client))
 
 ;; ---------------------------------------------------------------- frames
@@ -43,7 +47,7 @@
 (defrecord Frame [peer ctor site parent node key depth seq-id
                   ^objects vals #?(:clj ^booleans dirty :cljs dirty) ^objects subs ^objects exported ^objects sent
                   children cleanups remote-id alive arg-srcs order watching effects rendered shared
-                  ^objects plan queued ^objects deps])
+                  ^objects plan queued ^objects deps env ^objects holes])
 
 (defn kids-seq
   "Child frames of a node: nil, a single frame, or a map key -> frame."
@@ -135,36 +139,95 @@
   (or (identical? a b)
       (and (not (fn? a)) (not (fn? b)) (= a b))))
 
+(defn- report!
+  "A rendered hole changed state: tell the nearest error boundary (failures)
+  and suspense boundary (pending count). Client only; atoms in the env."
+  [^Frame f old v]
+  (let [env (.-env f)]
+    (when (and (failure? v) (not (failure? old)))
+      (when-let [[bf bi] (get env ::boundary)]
+        (reset! (value bf bi) (:error v))))
+    (when-let [[sf si] (get env ::suspense)]
+      (let [d (cond (and (pending? v) (not (pending? old))) 1
+                    (and (pending? old) (not (pending? v))) -1
+                    :else 0)]
+        (when-not (zero? d) (swap! (value sf si) + d))))))
+
+(defn- track! [^Frame f i old v]
+  (when (and (< i (alength ^objects (.-holes f)))
+             (aget ^objects (.-holes f) i)
+             (or (failure? v) (pending? v) (pending? old)))
+    (report! f old v)))
+
 (defn set-cell!
   "Set a cell's value, propagating if it changed."
   [f i v]
-  (when (and @(:alive f) (not (same-value? (value f i) v)))
-    (aset ^objects (:vals f) i v)
-    (changed! f i)))
+  (let [old (value f i)]
+    (when (and @(:alive f) (not (same-value? old v)))
+      (aset ^objects (:vals f) i v)
+      (track! f i old v)
+      (changed! f i))))
 
 (defn- set-live!
   "set-cell! for steps, which only run on live frames."
   [^Frame f i v]
-  (let [^objects vs (.-vals f)]
-    (when-not (same-value? (aget vs i) v)
+  (let [^objects vs (.-vals f)
+        old (aget vs i)]
+    (when-not (same-value? old v)
       (aset vs i v)
+      (track! f i old v)
       (changed! f i))))
 
 ;; ---------------------------------------------------------------- mounting
 
 (declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of)
 
+(def ^:private no-holes (object-array 0))
+
+(defn- frame-env
+  "A child inherits its parent's env; a link node's :bind adds entries
+  pointing at the parent's cells (r/binding, boundaries, suspense)."
+  [parent node]
+  (if (nil? parent)
+    {}
+    (let [env (.-env ^Frame parent)
+          bind (:bind (nth (:nodes (:ctor parent)) node))]
+      (if bind
+        (reduce-kv (fn [m k id] (assoc m k [parent id])) env bind)
+        env))))
+
+(defn- rendered? [peer ctor parent node]
+  (if parent
+    (boolean (and @(:rendered parent) (child-hole? (:ctor parent) node)))
+    (boolean (:render-root? peer))))
+
+(defn- hole-flags
+  "Which nodes are rendered holes, when someone (boundary, suspense) on the
+  client needs to hear about their state."
+  [peer ctor rendered env]
+  (if (and rendered (= :client (:site peer))
+           (or (contains? env ::boundary) (contains? env ::suspense)))
+    (let [hs (object-array (count (:nodes ctor)))]
+      (doseq [hole (:holes (:render ctor))]
+        (when (not= :child (first hole)) (aset hs (hole-node hole) true)))
+      hs)
+    no-holes))
+
 (defn- new-frame [peer ctor site parent node key]
-  (let [n (count (:nodes ctor))]
+  (let [n (count (:nodes ctor))
+        r (rendered? peer ctor parent node)
+        env (frame-env parent node)]
     (->Frame peer ctor site parent node key
              (if parent (inc (:depth parent)) 0)
              (vswap! (:seq peer) inc)
              (object-array n) #?(:clj (boolean-array n) :cljs (object-array n)) (object-array n) (object-array n) (object-array n)
              (volatile! {}) (volatile! []) (volatile! nil) (volatile! true)
              (volatile! {}) (volatile! {}) (volatile! {}) (volatile! {})
-             (volatile! false) (volatile! {})
+             (volatile! r) (volatile! {})
              (plan-for peer ctor site) (volatile! false)
-             (deps-of peer ctor))))
+             (deps-of peer ctor)
+             env
+             (hole-flags peer ctor r env))))
 
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."
@@ -186,9 +249,14 @@
         nodes (:nodes ctor)]
     (dotimes [i (count nodes)] (aset ^objects (:vals f) i pending))
     (doseq [[k src] (map-indexed vector arg-srcs)] (arg-source f k src))
-    (vreset! (:rendered f) (if parent
-                             (boolean (and @(:rendered parent) (child-hole? (:ctor parent) node)))
-                             (boolean (:render-root? peer))))
+    ;; dynamic vars bound by an enclosing r/binding behave like args
+    (dotimes [i (count nodes)]
+      (let [nd (nth nodes i)]
+        (when (= :dyn (:op nd))
+          (when-let [[pf pi] (get (:env f) (:var nd))]
+            (aset ^objects (:vals f) i (value pf pi))
+            (vswap! (:arg-srcs f) assoc i [pf pi])
+            (on-cleanup! f (subscribe! pf pi #(mark-dirty! f i)))))))
     (on-cleanup! f #(doseq [g (vals @(:effects f))] (g)))
     (on-cleanup! f #(doseq [{:keys [release]} (vals @(:shared f))] (release)))
     (vswap! (:frames peer) assoc (:seq-id f) f)
@@ -202,6 +270,14 @@
     (export! f)
     (when-let [hook (:on-mount peer)] (hook f))
     (when parent (bind-child! peer f))
+    ;; holes start pending: count them toward an enclosing suspense, and
+    ;; give them back when the frame goes away
+    (let [^objects hs (:holes f)]
+      (when (pos? (alength hs))
+        (let [pending-holes (fn [] (count (filter #(and (aget hs %) (pending? (value f %))) (range (alength hs)))))]
+          (when-let [[sf si] (get (:env f) ::suspense)]
+            (swap! (value sf si) + (pending-holes))
+            (on-cleanup! f #(swap! (value sf si) - (pending-holes)))))))
     (schedule-frame! f)
     f))
 
@@ -228,7 +304,7 @@
         nd (node-at f i)
         op (:op nd)]
     (cond
-      (= op :arg)
+      (or (= op :arg) (= op :dyn))
       (let [src (get @(:arg-srcs f) i)]
         (when src (let [[pf pi] src] (remote-read! pf pi))))
 
@@ -272,11 +348,19 @@
 (defn- child-ret-value [c]
   (if-let [r (:ret (:ctor c))] (value c r) nil))
 
+(defn- link-used?
+  "Is the value of link node i read by anyone? A loop or branch that is only
+  rendered never needs its children's return values."
+  [f i]
+  (let [nd (node-at f i)]
+    (boolean (or (seq (:readers nd)) (= i (:ret (:ctor f))) (aget ^objects (:exported f) i)))))
+
 (defn- link-child!
-  "Make node i of f follow child c's return value."
+  "Make node i of f follow child c's return value, when that value is used."
   [f i c]
   (when-let [r (:ret (:ctor c))]
-    (on-cleanup! c (subscribe! c r #(mark-dirty! f i)))
+    (when (link-used? f i)
+      (on-cleanup! c (subscribe! c r #(mark-dirty! f i))))
     (when (= :link (aget ^objects (:exported f) i))
       (remote-read! c r))))
 
@@ -377,9 +461,17 @@
       (do (doseq [[pf pi] (arg-srcs f (:args nd))] (remote-read! pf pi))
           pending)
 
+      ;; woken by a child's return value, not by the collection: no
+      ;; reconciliation needed
+      (identical? coll (get @(:order f) [::coll i]))
+      (let [kids (children-of f i)
+            rets (mapv #(child-ret-value (kids %)) (get @(:order f) i))]
+        (or (some #(when (or (pending? %) (failure? %)) %) rets) rets))
+
       :else
       (let [kf (or (:key nd) identity)
             items (vec coll)
+            prev-ks (get @(:order f) i)
             cur (or (children-of f i) {})
             ;; keys made unique per occurrence
             ks (let [seen (volatile! {})]
@@ -397,10 +489,12 @@
                                                         (into [[:value x]] captures)))))
                            {} (map vector ks items))]
           (vswap! (:children f) assoc i kids)
-          (vswap! (:order f) assoc i ks)
-          (when-let [h (:on-children (:peer f))] (h f i))
-          (let [rets (mapv #(child-ret-value (kids %)) ks)]
-            (or (some #(when (or (pending? %) (failure? %)) %) rets) rets)))))))
+          (vswap! (:order f) assoc i ks [::coll i] coll)
+          (when (not= ks prev-ks)
+            (when-let [h (:on-children (:peer f))] (h f i)))
+          (when (link-used? f i)
+            (let [rets (mapv #(child-ret-value (kids %)) ks)]
+              (or (some #(when (or (pending? %) (failure? %)) %) rets) rets))))))))
 
 (defn- compute-watch [f i nd]
   (let [r (value f (first (:in nd)))]
@@ -422,10 +516,11 @@
     (when-let [g (get @(:effects f) i)] (g) (vswap! (:effects f) dissoc i))
     (if (or (pending? args) (failure? args))
       args
-      (let [cleanup (apply (:f nd) args)]
-        (when (fn? cleanup)
-          (vswap! (:effects f) assoc i cleanup))
-        nil))))
+      (let [cleanup (guarded (apply (:f nd) args))]
+        (cond
+          (failure? cleanup) cleanup
+          (fn? cleanup) (do (vswap! (:effects f) assoc i cleanup) nil)
+          :else nil)))))
 
 (defn- compute-shared
   "Server: follow a process-wide shared value (curve.shared), keyed by the
@@ -457,9 +552,6 @@
 
 (defn- settled? [x] (not (or (pending? x) (failure? x))))
 
-#?(:clj
-   (defmacro guarded [& body]
-     `(try ~@body (catch ~(if (:ns &env) :default 'Throwable) e# (curve.runtime/failure e#)))))
 
 (defn- call-step [nd]
   (let [g (:f nd) in (:in nd)]
@@ -486,6 +578,10 @@
       :arg (fn [f i] (let [[pf pi] (get @(:arg-srcs f) i)]
                        (when pf (set-cell! f i (value pf pi)))))
       :const nil
+      :dyn (let [dflt (:default nd)]
+             (fn [f i] (if-let [[pf pi] (get @(:arg-srcs f) i)]
+                         (set-cell! f i (value pf pi))
+                         (set-cell! f i (if dflt (guarded (dflt)) nil)))))
       :call (when mine? (call-step nd))
       :watch (when mine? (fn [f i] (set-cell! f i (guarded (compute-watch f i nd)))))
       :effect (when mine? (fn [f i] (set-cell! f i (compute-effect f i nd))))
@@ -760,3 +856,14 @@
     f))
 
 (defn frames [peer] (vals @(:frames peer)))
+
+(defn offload!
+  "Run thunk off the calling thread (a virtual thread on the JVM) and emit
+  its result, or a failure. Returns a cancel fn."
+  [thunk emit!]
+  #?(:clj (let [t (Thread/startVirtualThread
+                    (fn [] (let [r (try (thunk) (catch InterruptedException _ ::cancelled)
+                                        (catch Throwable e (failure e)))]
+                             (when-not (= r ::cancelled) (emit! r)))))]
+            (fn [] (.interrupt t)))
+     :cljs (do (emit! (failure (js/Error. "r/offload runs on the server"))) (fn []))))
