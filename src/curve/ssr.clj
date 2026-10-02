@@ -27,6 +27,8 @@
 
 (defn- new-token [] (str (java.util.UUID/randomUUID)))
 
+(defn peek-detached [token] (get @detached token))
+
 (defn take-detached!
   "The detached session for token, removed from the registry (resume once)."
   [token]
@@ -78,17 +80,46 @@
     (when (and (< quiet 2) (< (System/currentTimeMillis) deadline))
       (if (step! st quiet-ms) (recur 0) (do (shared/await-idle) (recur (inc quiet)))))))
 
+(defn- live-server?
+  "Does the server still have live inputs after the render (watched refs,
+  shared values, effects) or did it hand the client a server fn?"
+  [session client]
+  (or (session/call session
+                    (fn [] (boolean (some (fn [f] (some (fn [nd] (and (= :server (rt/node-site f nd))
+                                                                       (contains? #{:watch :shared :effect} (:op nd))))
+                                                        (:nodes (:ctor f))))
+                                          (rt/frames (:peer session))))))
+      (boolean (some (fn [f] (some #(rt/remote-fn? (rt/value f %)) (range (count (:nodes (:ctor f))))))
+                     (rt/frames client)))))
+
+(defn- client-logic?
+  "Does the page need JS at all: handlers, client state or effects?"
+  [client]
+  (boolean (some (fn [f] (or (some #(contains? #{:event :spread :foreign} (first %)) (:holes (:render (:ctor f))))
+                             (some (fn [nd] (and (= :client (rt/node-site f nd))
+                                                 (contains? #{:watch :effect} (:op nd))))
+                                   (:nodes (:ctor f)))))
+                 (rt/frames client))))
+
 (defn- finish!
-  "Exchange final acks, snapshot the client and detach the session."
+  "Exchange final acks, snapshot the client and detach (or close) the session."
   [{:keys [session up down client] :as st} grace-ms]
   (step! st 5)
   (session/call session (fn [] nil))
-  (let [state {:peer (rt/resume-snapshot client)
+  (let [live? (live-server? session client)
+        tier (cond live? :live (client-logic? client) :client :else :html)
+        state {:peer (rt/resume-snapshot client)
                :down (codec/export-state down)
-               :up (codec/export-state (:enc up))}
-        token (keep-detached! session grace-ms)]
-    {:token token
+               :up (codec/export-state (:enc up))
+               :static (not live?)}
+        token (if live? (keep-detached! session grace-ms) (do (session/close! session) nil))]
+    {:token token :tier tier
      :state (.encodeToString (Base64/getEncoder) ^bytes (codec/encode-delta-blob [:v state]))}))
+
+(defn- with-token
+  "Forms that post without JS need the session token."
+  [html token]
+  (if token (str/replace html "/curve/action?" (str "/curve/action?token=" token "&amp;")) html))
 
 (defn- body-html [root] (h/html root))
 
@@ -98,21 +129,24 @@
   [ctor args & {:keys [url timeout-ms quiet-ms grace-ms] :or {timeout-ms 2000 quiet-ms 20 grace-ms 30000}}]
   (let [st (start ctor args url)]
     (settle! st quiet-ms (+ (System/currentTimeMillis) timeout-ms))
-    (assoc (finish! st grace-ms) :html (body-html (:root st)))))
+    (let [r (finish! st grace-ms)]
+      (assoc r :html (with-token (body-html (:root st)) (:token r))))))
 
 (defn- esc-js [s] (str/replace (str s) "</" "<\\/"))
 
 (defn resume-script [{:keys [token state]}]
-  (str "<script>window.__CURVE__={token:\"" token "\",state:\"" (esc-js state) "\"};</script>"))
+  (str "<script>window.__CURVE__={token:" (if token (str "\"" token "\"") "null") ",state:\"" (esc-js state) "\"};</script>"))
 
 (defn page
-  "A full HTML page around a render result."
-  [{:keys [html] :as result} {:keys [title script head]}]
+  "A full HTML page around a render result. A page with no client logic
+  (tier :html) gets no script at all."
+  [{:keys [html tier] :as result} {:keys [title script head]}]
   (str "<!doctype html><html><head><meta charset=\"utf-8\">"
        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
        "<title>" title "</title>" head "</head><body><div id=\"app\">" html "</div>"
-       (resume-script result)
-       "<script src=\"" script "\"></script></body></html>"))
+       (when-not (= tier :html)
+         (str (resume-script result) "<script src=\"" script "\"></script>"))
+       "</body></html>"))
 
 ;; ---------------------------------------------------------------- streaming
 

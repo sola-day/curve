@@ -42,6 +42,10 @@
      (defmacro boundary "(r/boundary (fn [err retry] fallback) body) show fallback when body fails." [& body] (only-in-reactive &form))
      (defmacro suspense "(r/suspense fallback body) show fallback while body has pending values." [& body] (only-in-reactive &form))
      (defmacro -with-env [& body] (only-in-reactive &form))
+     (defmacro static
+       "(r/static expr) evaluate expr once at build time on the JVM (read a
+       file, render Markdown); the value is a constant in both builds."
+       [& body] (only-in-reactive &form))
      (defmacro foreign
        "(r/foreign mount props) give a DOM element to a JS component: (mount el
        props) returns {:update (fn [props]) :unmount (fn [])}; props are reactive."

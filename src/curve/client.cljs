@@ -26,42 +26,76 @@
     {:token (.-token c)
      :data (second (codec/decode-delta-blob (base64->bytes (.-state c))))}))
 
+(declare start!)
+
+(defn- open-ws! [{:keys [url token on-message on-open]}]
+  (let [ws (js/WebSocket. (str (or url (default-url)) (when token (str "?resume=" token))))]
+    (set! (.-binaryType ws) "arraybuffer")
+    (set! (.-onopen ws) on-open)
+    (set! (.-onmessage ws) on-message)
+    ws))
+
 (defn start!
-  "Mount ctor into container and connect. Returns a handle with :peer."
-  [ctor & {:keys [url container router? seed resume?] :or {router? true resume? true}}]
+  "Mount ctor into container and connect. Returns a handle with :peer.
+  opts: :url; :container; :router? (true); :resume? (true: continue a server
+  render left in the page); :connect :eager (default) or :lazy (open the
+  websocket when the client first has something to send)."
+  [ctor & {:keys [url container router? seed resume? connect] :or {router? true resume? true}}]
   (when router? (router/install!))
   (let [container (or container (.getElementById js/document "app") (.-body js/document))
         resume (when resume? (resume-data))
+        static? (boolean (and resume (:static (:data resume))))
+        lazy? (or static? (= connect :lazy))
         hooks (mount/renderer (dom/dom) container)
         up (if resume
              (let [st (codec/import-state (:up (:data resume)))] {:encode #(codec/encode st %)})
              (codec/link))
         down (if resume (codec/import-state (:down (:data resume))) (codec/decoder-state))
-        ws (js/WebSocket. (str (or url (default-url)) (when resume (str "?resume=" (:token resume)))))
+        ws (volatile! nil)
         outbox #js []
         scheduled (volatile! false)
         peer-ref (volatile! nil)
-        send! (fn [bs] (if (= 1 (.-readyState ws)) (.send ws bs) (.push outbox bs)))
+        handle (volatile! nil)
+        on-message (fn [e]
+                     (rt/receive! @peer-ref (codec/decode down (js/Uint8Array. (.-data e))))
+                     (when-let [h (:schedule! @handle)] (h)))
+        on-open (fn []
+                  (doseq [bs (array-seq outbox)] (.send @ws bs))
+                  (set! (.-length outbox) 0)
+                  ;; tests and tooling can wait for this
+                  (.setAttribute (.-documentElement js/document) "data-curve" "ready"))
+        ensure-ws! (fn [] (or @ws (vreset! ws (open-ws! {:url url :token (:token resume)
+                                                         :on-message on-message :on-open on-open}))))
+        go-live! (fn []
+                   ;; a statically built page has no session behind it: when it
+                   ;; first needs the server, remount live, keeping local state
+                   (let [root (first (filter #(nil? (:parent %)) (rt/frames @peer-ref)))
+                         seed (when root (rt/snapshot root))]
+                     (when root (rt/unmount-frame! root))
+                     (set! (.-innerHTML container) "")
+                     (vreset! handle (start! ctor :url url :container container :router? false
+                                             :resume? false :seed seed))))
+        send! (fn [bs]
+                (cond
+                  static? (when-not (:live @handle) (vswap! handle assoc :live true) (go-live!))
+                  :else (let [w (ensure-ws!)]
+                          (if (= 1 (.-readyState w)) (.send w bs) (.push outbox bs)))))
         flush! (fn []
                  (vreset! scheduled false)
                  (let [peer @peer-ref]
                    (rt/run! peer)
                    (when-let [m (rt/take-message! peer)]
-                     (send! ((:encode up) m)))))
+                     ;; acks alone do not justify opening a connection
+                     (when (or @ws (seq (dissoc m :ack)))
+                       (send! ((:encode up) m))))))
         schedule! (fn [] (when-not @scheduled
                            (vreset! scheduled true)
                            (js/queueMicrotask flush!)))
         peer (apply rt/peer :client (mapcat identity (assoc (dissoc hooks :mounter) :on-schedule schedule!)))]
     (vreset! peer-ref peer)
-    (set! (.-binaryType ws) "arraybuffer")
-    (set! (.-onopen ws) (fn []
-                          (doseq [bs (array-seq outbox)] (.send ws bs))
-                          (set! (.-length outbox) 0)
-                          ;; tests and tooling can wait for this
-                          (.setAttribute (.-documentElement js/document) "data-curve" "ready")))
-    (set! (.-onmessage ws) (fn [e]
-                             (rt/receive! peer (codec/decode down (js/Uint8Array. (.-data e))))
-                             (schedule!)))
+    (vreset! handle {:schedule! schedule!})
+    (when-not lazy? (ensure-ws!))
+    (when static? (.setAttribute (.-documentElement js/document) "data-curve" "ready"))
     (if resume
       ;; replace the server-rendered DOM within this task: the browser does
       ;; not paint in between, and the values come from the snapshot
@@ -86,12 +120,11 @@
   local state across by stable node ids. Hook it to shadow-cljs :after-load."
   []
   (when-let [{:keys [peer ws opts]} @current]
+    (when-let [w @ws] (set! (.-onclose w) nil) (.close w))
     (let [root (first (filter #(nil? (:parent %)) (rt/frames peer)))
           seed (when root (rt/snapshot root))
           name (:name (:ctor root))
           container (or (:container opts) (.getElementById js/document "app") (.-body js/document))]
-      (set! (.-onclose ws) nil)
-      (.close ws)
       (when root (rt/unmount-frame! root))
       (set! (.-innerHTML container) "")
       (reset! current (apply start! (or (rt/ctor-by-name name) (:ctor @current))

@@ -37,6 +37,29 @@
           :on-error (fn [_ e] (when on-error (on-error e)) (some-> @s session/close!))}})
       {:status 400 :body "websocket expected"})))
 
+(defn- form-params [^String body]
+  (into {} (for [kv (clojure.string/split (or body "") #"&") :when (seq kv)
+                 :let [[k v] (clojure.string/split kv #"=" 2)]]
+             [(keyword (java.net.URLDecoder/decode k "UTF-8")) (java.net.URLDecoder/decode (or v "") "UTF-8")])))
+
+(defn action-handler
+  "POST /curve/action: a form submitted without JS. Calls the server fn
+  the form's submit handler names, in the session the page was rendered
+  with, then redirects back (design §7.5)."
+  [request]
+  (let [q (into {} (for [kv (clojure.string/split (or (:query-string request) "") #"&")
+                         :let [[k v] (clojure.string/split kv #"=" 2)] :when k]
+                     [k v]))
+        s (when-let [t (get q "token")] ((requiring-resolve 'curve.ssr/peek-detached) t))
+        frame (some-> (get q "frame") parse-long)
+        node (some-> (get q "node") parse-long)]
+    (if (and s frame node (= :post (:request-method request)))
+      (let [form (form-params (slurp (:body request)))]
+        (session/call s (fn [] ((requiring-resolve 'curve.runtime/receive!)
+                                (:peer s) {:call [[0 frame node [{:type "submit" :form form}]]]})))
+        {:status 303 :headers {"Location" (or (get-in request [:headers "referer"]) "/")}})
+      {:status 400 :body "unknown or expired form"})))
+
 (defn page
   "Minimal HTML shell that loads the client bundle."
   [{:keys [title script]}]

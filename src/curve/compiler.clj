@@ -115,7 +115,8 @@
   '#{curve.core/server curve.core/client curve.core/for curve.core/watch curve.core/call
      curve.core/mutation curve.core/effect curve.core/suspense curve.core/boundary
      curve.core/binding curve.core/shared curve.core/offload curve.core/flow
-     curve.core/-with-env curve.core/route curve.core/defer curve.core/declassify curve.core/foreign})
+     curve.core/-with-env curve.core/route curve.core/defer curve.core/declassify curve.core/foreign
+     curve.core/static})
 
 (defn- head-name [env h]
   (when (and (symbol? h) (not (local-name? env h)) (not (special-forms h)))
@@ -394,6 +395,11 @@
                         curve.core/offload curve.core/mutation curve.core/route curve.core/defer
                         curve.core/foreign} q)
           (compile-form env (rewrite q form))
+          (= q 'curve.core/static)
+          ;; evaluated once, at build time, on the JVM; the result is a constant
+          (let [nsym (if (cljs? (:menv env)) (:name (:ns (:menv env))) (ns-name *ns*))
+                v (binding [*ns* (or (find-ns nsym) *ns*)] (eval (cons 'do args)))]
+            (const! env v))
           (= q 'curve.core/declassify)
           (let [[x reason] args]
             (when-not (and (string? reason) (seq reason))

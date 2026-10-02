@@ -66,6 +66,9 @@
         (and t (some? (.-value t))) (assoc :value (.-value t))
         (and t (= "checkbox" (.-type t))) (assoc :checked (.-checked t))
         (.-key e) (assoc :key (.-key e))
-        (and t (= "scroll" (.-type e))) (assoc :scroll-top (.-scrollTop t))))))
+        (and t (= "scroll" (.-type e))) (assoc :scroll-top (.-scrollTop t))
+        (and t (= "submit" (.-type e)))
+        (assoc :form (into {} (for [[k v] (es6-iterator-seq (.entries (js/FormData. t)))] [(keyword k) v]))))))
+  (prevent-default! [_ e] (.preventDefault e)))
 
 (defn dom [] (BrowserDom.))

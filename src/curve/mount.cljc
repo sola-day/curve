@@ -66,9 +66,19 @@
                 (upd)
                 (rt/on-cleanup! f (rt/subscribe! f id upd)))
         :event (let [[type id] more]
+                 (when (= type "submit")
+                   ;; without JS the form posts to the server fn (design §7.5)
+                   (let [upd (fn [] (let [h (rt/value f id)]
+                                      (when (and (rt/remote-fn? h) @(:remote-id f))
+                                        (d/set-attr! dom node "method" "post")
+                                        (d/set-attr! dom node "action"
+                                                     (str "/curve/action?frame=" @(:remote-id f) "&node=" id)))))]
+                     (upd)
+                     (rt/on-cleanup! f (rt/subscribe! f id upd))))
                  (rt/on-cleanup! f (d/listen! dom node type
                                               (fn [e] (let [h (rt/value f id)]
                                                         (when (fn? h)
+                                                          (when (= type "submit") (d/prevent-default! dom e))
                                                           ;; a server closure gets a serializable event
                                                           (h (if (rt/remote-fn? h) (d/event-data dom e) e))))))))
         :spread (let [[id] more

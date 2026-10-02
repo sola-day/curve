@@ -43,6 +43,11 @@
 
 (defn children [n] @(:children n))
 
+(defn- inputs-of [n]
+  (let [acc (volatile! [])]
+    ((fn walk [x] (when (= "input" (:tag x)) (vswap! acc conj x)) (run! walk @(:children x))) n)
+    @acc))
+
 (defrecord Headless []
   api/Dom
   (instantiate [_ render] (mapv build (:tree render)))
@@ -70,7 +75,12 @@
       (cond-> {:type (:type e)}
         (some? (get @(:props t) "value")) (assoc :value (get @(:props t) "value"))
         (some? (get @(:props t) "checked")) (assoc :checked (get @(:props t) "checked"))
-        (:key e) (assoc :key (:key e))))))
+        (:key e) (assoc :key (:key e))
+        (= "submit" (:type e)) (assoc :form (into {} (for [el (inputs-of t)
+                                                           :let [n (get @(:attrs el) "name")]
+                                                           :when n]
+                                                       [(keyword n) (str (get @(:props el) "value" ""))]))))))
+  (prevent-default! [_ _] nil))
 
 (defn dom [] (->Headless))
 
