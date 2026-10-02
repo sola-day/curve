@@ -21,7 +21,7 @@
   (loop [n 0] (when (and (not (pred)) (< n 200)) (Thread/sleep 25) (recur (inc n)))))
 
 (deftest shared-value-computed-once
-  (wait-until #(zero? (shared/instance-count)))
+  (wait-until #(not-any? (fn [k] (= ::table (second k))) (keys @shared/instances)))
   (reset! computations 0)
   (let [a (-> (ct/pair) (ct/mount! Table)) b (-> (ct/pair) (ct/mount! Table))]
     (settle! a) (settle! b)
@@ -31,7 +31,7 @@
     (is (= 2 @computations) "one recompute for both sessions")
     (rt/unmount-frame! (:server-root a)) (rt/unmount-frame! (:server-root b))
     (shared/await-idle)
-    (is (zero? (shared/instance-count)) "released when the last follower leaves")))
+    (is (not-any? #(= ::table (second %)) (keys @shared/instances)) "released when the last follower leaves")))
 
 (deftest encode-once-across-sessions
   (reset! !table (vec (for [i (range 1000)] {:id i :name (str "p" i)})))
@@ -58,7 +58,7 @@
         (is (every? #(identical? (ffirst vals) (first %)) vals) "same persistent value in every session")
         (is (every? #(= ::rt/version (first (second %))) vals))))
     (run! session/close! sessions)
-    (wait-until #(zero? (shared/instance-count)))))
+    (wait-until #(not-any? (fn [k] (= ::table (second k))) (keys @shared/instances)))))
 
 (deftest jdbc-polling-source
   (let [f (java.io.File/createTempFile "curve" ".db")

@@ -9,9 +9,14 @@
   "Connect a client and a server peer in-process. Messages go through the
   binary codec (a link per direction) unless :binary? false."
   [& {:keys [binary? client-opts server-opts] :or {binary? true}}]
-  (let [client (apply rt/peer :client (mapcat identity client-opts))
-        server (apply rt/peer :server (mapcat identity server-opts))]
-    {:client client :server server :binary? binary?
+  (let [;; notifications from other threads (watches, shared values) are
+        ;; queued and applied on the test thread during flush!, as a real
+        ;; session would
+        cq (atom #?(:clj clojure.lang.PersistentQueue/EMPTY :cljs cljs.core/PersistentQueue.EMPTY))
+        sq (atom #?(:clj clojure.lang.PersistentQueue/EMPTY :cljs cljs.core/PersistentQueue.EMPTY))
+        client (apply rt/peer :client (mapcat identity (merge {:post! #(swap! cq conj %)} client-opts)))
+        server (apply rt/peer :server (mapcat identity (merge {:post! #(swap! sq conj %)} server-opts)))]
+    {:client client :server server :binary? binary? :posted {:client cq :server sq}
      :links {:s->c (codec/link) :c->s (codec/link)}
      :wire (atom [])}))
 
@@ -33,16 +38,25 @@
           (rt/receive! to m)))
     true))
 
+(defn- drain-posted! [q]
+  (when q
+    (loop []
+      (let [[old _] (swap-vals! q pop)]
+        (when-let [g (peek old)] (g) (recur))))))
+
 (defn flush!
   "Run both peers and exchange messages until nothing is left to do."
   [{:keys [client server] :as p}]
   (loop [n 0]
     (when (> n 1000) (throw (ex-info "curve.test/flush!: no quiescence" {})))
+    (drain-posted! (get-in p [:posted :server]))
     (rt/run! server)
+    (drain-posted! (get-in p [:posted :client]))
     (rt/run! client)
     (let [a (deliver! p server client :s->c)
           b (deliver! p client server :c->s)]
-      (when (or a b) (recur (inc n)))))
+      (when (or a b (seq @(get-in p [:posted :server] (atom nil))) (seq @(get-in p [:posted :client] (atom nil))))
+        (recur (inc n)))))
   p)
 
 (defn wire-log [p] @(:wire p))

@@ -42,6 +42,17 @@
   #?(:cljs (if (map? e) (:value e) (.. e -target -value))
      :clj (or (:value e) (some-> (:target e) :props deref (get "value")))))
 
+(clojure.core/defn event-key
+  "The key of a keyboard event, on either platform."
+  [e]
+  #?(:cljs (if (map? e) (:key e) (.-key e)) :clj (:key e)))
+
+(clojure.core/defn event-checked
+  "The checked state of a checkbox event's target, on either platform."
+  [e]
+  #?(:cljs (if (map? e) (:checked e) (.. e -target -checked))
+     :clj (boolean (or (:checked e) (some-> (:target e) :props deref (get "checked"))))))
+
 (def pending rt/pending)
 (def pending? rt/pending?)
 (def failure? rt/failure?)

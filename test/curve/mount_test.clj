@@ -66,3 +66,14 @@
 (deftest non-hiccup-ctor-renders-text
   (let [p (render-pair Plain 5)]
     (is (= "x=5" (h/html (:dom-root p))))))
+
+(deftest server-skips-client-only-subtrees
+  (reset! !state {:items (vec (for [i (range 200)] {:id i :title (str i)})) :user "ada"})
+  (let [p (render-pair TodoApp)]
+    (is (= 200 (count (h/query-all (:dom-root p) "li"))))
+    (is (< (count (rt/frames (:server p))) 10)
+        "rows have no server code, so the server does not mirror them")
+    (testing "a server closure in a skipped subtree's parent still works"
+      (h/fire! (h/query (:dom-root p) "button") "click" {})
+      (ct/flush! p)
+      (is (= 201 (count (h/query-all (:dom-root p) "li")))))))

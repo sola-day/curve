@@ -2,4 +2,12 @@
  {:hello {:target :browser
           :output-dir "examples/hello/resources/public/js"
           :asset-path "/js"
-          :modules {:main {:init-fn hello.client/init}}}}}
+          :modules {:main {:init-fn hello.client/init}}}
+  :todomvc {:target :browser
+            :output-dir "examples/todomvc/resources/public/js"
+            :asset-path "/js"
+            :modules {:main {:init-fn todomvc.client/init}}}
+  :sqlite {:target :browser
+           :output-dir "examples/sqlite-table/resources/public/js"
+           :asset-path "/js"
+           :modules {:main {:init-fn sqlite-table.client/init}}}}}

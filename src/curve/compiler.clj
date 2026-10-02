@@ -14,13 +14,18 @@
 
 (defn cljs? [menv] (boolean (:ns menv)))
 
-(defn- cljs-resolve [menv sym]
-  (let [expander ((requiring-resolve 'cljs.analyzer/get-expander) sym menv)]
-    (if expander
-      {:name (symbol expander) :macro true}
-      (when-let [v (binding [*err* (java.io.StringWriter.)]
-                     ((requiring-resolve 'cljs.analyzer.api/resolve) menv sym))]
-        {:name (:name v)}))))
+(defn- cljs-resolve
+  "Resolve in the cljs analyzer without warnings: server-only namespaces are
+  legitimately absent from the browser build (their code is not emitted)."
+  [menv sym]
+  (let [warnings-var (requiring-resolve 'cljs.analyzer/*cljs-warnings*)
+        quiet (zipmap (keys @warnings-var) (repeat false))]
+    (with-bindings {warnings-var quiet}
+      (let [expander ((requiring-resolve 'cljs.analyzer/get-expander) sym menv)]
+        (if expander
+          {:name (symbol expander) :macro true}
+          (when-let [v ((requiring-resolve 'cljs.analyzer.api/resolve) menv sym)]
+            {:name (:name v)}))))))
 
 (defn- host-resolve
   "{:name qualified-sym :macro bool} for a global symbol, nil for host locals
@@ -255,6 +260,9 @@
 
       (local-name? env h)
       (if (reactive-free? env form) (lift env form) (compile-call env form))
+
+      (and (special-forms h) (not= h 'quote) (reactive-free? env form))
+      (lift env form)
 
       (special-forms h)
       (case h

@@ -24,7 +24,8 @@
   (parent, node, key), so peers agree without coordination."
   (:refer-clojure :exclude [run!])
   (:require [curve.codec :as codec]
-            [curve.delta :as delta]))
+            [curve.delta :as delta])
+  #?(:cljs (:require-macros [curve.runtime :refer [guarded]])))
 
 ;; ---------------------------------------------------------------- values
 
@@ -40,8 +41,9 @@
 ;; ---------------------------------------------------------------- frames
 
 (defrecord Frame [peer ctor site parent node key depth seq-id
-                  ^objects vals ^objects dirty ^objects subs ^objects exported ^objects sent
-                  children cleanups remote-id alive arg-srcs order watching effects rendered shared])
+                  ^objects vals #?(:clj ^booleans dirty :cljs dirty) ^objects subs ^objects exported ^objects sent
+                  children cleanups remote-id alive arg-srcs order watching effects rendered shared
+                  ^objects plan queued ^objects deps])
 
 (defn kids-seq
   "Child frames of a node: nil, a single frame, or a map key -> frame."
@@ -69,14 +71,17 @@
 (defn- arg-id [ctor k] (nth (:arg-ids ctor) k k))
 (defn value [f i] (aget ^objects (:vals f) i))
 
-(defn- schedule-frame! [f]
-  (let [peer (:peer f)]
-    (vswap! (:queue peer) assoc [(:depth f) (:seq-id f)] f)
-    (when-let [hook (:on-schedule peer)] (hook))))
+(defn- schedule-frame! [^Frame f]
+  (let [q (.-queued f)]
+    (when-not @q
+      (vreset! q true)
+      (let [peer (:peer f)]
+        (vswap! (:queue peer) assoc [(:depth f) (:seq-id f)] f)
+        (when-let [hook (:on-schedule peer)] (hook))))))
 
 (defn mark-dirty! [f i]
   (when @(:alive f)
-    (aset ^objects (:dirty f) i true)
+    (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true)
     (schedule-frame! f)))
 
 (defn subscribe!
@@ -111,14 +116,20 @@
 
 (defn- changed!
   "Cell (f, i) took a new value: wake local readers and remote ones."
-  [f i]
-  (let [deps (get-in f [:ctor :dependents i])]
-    (doseq [j deps] (aset ^objects (:dirty f) j true))
-    (when (seq deps) (schedule-frame! f)))
-  (when-let [s (aget ^objects (:subs f) i)]
-    (doseq [cb @s] (cb)))
-  (when (aget ^objects (:exported f) i)
-    (queue-send! f i)))
+  [^Frame f i]
+  (let [i (int i)
+        ^ints deps (aget ^objects (.-deps f) i)
+        n (alength deps)]
+    (when (pos? n)
+      (let [dirty (.-dirty f)]
+        (dotimes [k n] (aset #?(:clj ^booleans dirty :cljs dirty) (aget deps k) true)))
+      ;; while a frame is processed its queued flag stays set: it reaches its
+      ;; higher-numbered dependents in this same pass (topological order)
+      (schedule-frame! f))
+    (when-let [s (aget ^objects (.-subs f) i)]
+      (doseq [cb @s] (cb)))
+    (when (aget ^objects (.-exported f) i)
+      (queue-send! f i))))
 
 (defn- same-value? [a b]
   (or (identical? a b)
@@ -131,19 +142,29 @@
     (aset ^objects (:vals f) i v)
     (changed! f i)))
 
+(defn- set-live!
+  "set-cell! for steps, which only run on live frames."
+  [^Frame f i v]
+  (let [^objects vs (.-vals f)]
+    (when-not (same-value? (aget vs i) v)
+      (aset vs i v)
+      (changed! f i))))
+
 ;; ---------------------------------------------------------------- mounting
 
-(declare mount-frame! unmount-frame! compute! bind-child! unbind! apply-val!)
+(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of)
 
 (defn- new-frame [peer ctor site parent node key]
   (let [n (count (:nodes ctor))]
     (->Frame peer ctor site parent node key
              (if parent (inc (:depth parent)) 0)
              (vswap! (:seq peer) inc)
-             (object-array n) (object-array n) (object-array n) (object-array n) (object-array n)
+             (object-array n) #?(:clj (boolean-array n) :cljs (object-array n)) (object-array n) (object-array n) (object-array n)
              (volatile! {}) (volatile! []) (volatile! nil) (volatile! true)
              (volatile! {}) (volatile! {}) (volatile! {}) (volatile! {})
-             (volatile! false) (volatile! {}))))
+             (volatile! false) (volatile! {})
+             (plan-for peer ctor site) (volatile! false)
+             (deps-of peer ctor))))
 
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."
@@ -177,7 +198,7 @@
         (case (:op nd)
           :arg nil
           :const (aset ^objects (:vals f) i (:v nd))
-          (aset ^objects (:dirty f) i true))))
+          (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true))))
     (export! f)
     (when-let [hook (:on-mount peer)] (hook f))
     (when parent (bind-child! peer f))
@@ -259,12 +280,51 @@
     (when (= :link (aget ^objects (:exported f) i))
       (remote-read! c r))))
 
+(defn server-free?
+  "True when no node of ctor (running at site), nor of any ctor it mounts,
+  is computed on or read by the server."
+  [peer ctor site]
+  (let [k [(:name ctor) site]
+        memo (:server-free peer)]
+    (if (contains? @memo k)
+      (get @memo k)
+      (do
+        (vswap! memo assoc k false) ; recursion: assume the worst
+        (let [rs (fn [s] (if (= s :inherit) site s))
+              sub (fn [nd c] (or (nil? c) (server-free? peer c (or (rs (:ctx-site nd)) site))))
+              r (every? (fn [nd]
+                          (and (not= :server (rs (:site nd)))
+                               (not-any? #(= :server (rs %)) (:readers nd))
+                               (case (:op nd)
+                                 :shared false
+                                 :branch (every? #(sub nd %) (:ctors nd))
+                                 :for (sub nd (:ctor nd))
+                                 :mount (if-let [t (:ctor-fn nd)] (sub nd (t)) false)
+                                 true)))
+                        (:nodes ctor))]
+          (vswap! memo assoc k r)
+          r)))))
+
+(defn- skip-child?
+  "Demand-driven: the server does not instantiate a subtree it neither
+  computes nor reads; it only exports what the subtree captures."
+  [f i ctor]
+  (let [peer (:peer f)
+        nd (node-at f i)]
+    (and (= :server (:site peer))
+         (not-any? #(= :server (resolve-site f %)) (:readers nd))
+         (server-free? peer ctor (or (resolve-site f (:ctx-site nd)) (:site f))))))
+
 (defn- mount-child! [f i ctor key arg-srcs]
-  (let [nd (node-at f i)
-        site (or (resolve-site f (:ctx-site nd)) (:site f))
-        c (mount-frame! (:peer f) ctor site f i key arg-srcs)]
-    (link-child! f i c)
-    c))
+  (if (skip-child? f i ctor)
+    (do (doseq [src arg-srcs]
+          (when-not (= :value (first src)) (let [[pf pi] src] (remote-read! pf pi))))
+        nil)
+    (let [nd (node-at f i)
+          site (or (resolve-site f (:ctx-site nd)) (:site f))
+          c (mount-frame! (:peer f) ctor site f i key arg-srcs)]
+      (link-child! f i c)
+      c)))
 
 (defn- arg-srcs [f ids] (mapv (fn [j] [f j]) ids))
 
@@ -283,8 +343,9 @@
               (if-let [ctor (nth (:ctors nd) sel nil)]
                 (let [srcs (arg-srcs f (nth (:args nd) sel))
                       c (mount-child! f i ctor sel srcs)]
-                  (vswap! (:children f) assoc i c)
-                  (child-ret-value c))
+                  (if c
+                    (do (vswap! (:children f) assoc i c) (child-ret-value c))
+                    (do (vswap! (:children f) dissoc i) pending)))
                 (do (vswap! (:children f) dissoc i) nil))))))))
 
 (defn- compute-mount [f i nd]
@@ -302,14 +363,21 @@
 
       :else
       (do (when cur (unmount-frame! cur))
-          (let [c (mount-child! f i ctor key (arg-srcs f ids))]
-            (vswap! (:children f) assoc i c)
-            (child-ret-value c))))))
+          (if-let [c (mount-child! f i ctor key (arg-srcs f ids))]
+            (do (vswap! (:children f) assoc i c) (child-ret-value c))
+            (do (vswap! (:children f) dissoc i) pending))))))
 
 (defn- compute-for [f i nd]
   (let [coll (value f (first (:in nd)))]
-    (if (or (pending? coll) (failure? coll))
+    (cond
+      (or (pending? coll) (failure? coll))
       coll
+
+      (skip-child? f i (:ctor nd))
+      (do (doseq [[pf pi] (arg-srcs f (:args nd))] (remote-read! pf pi))
+          pending)
+
+      :else
       (let [kf (or (:key nd) identity)
             items (vec coll)
             cur (or (children-of f i) {})
@@ -382,37 +450,88 @@
           (vswap! (:shared f) assoc-in [i :version] version)
           v)))))
 
-(defn compute! [f i]
-  (let [nd (node-at f i)
-        peer (:peer f)
-        mine? (= (node-site f nd) (:site peer))]
-    (case (:op nd)
-      :arg (let [[pf pi] (get @(:arg-srcs f) i)]
-             (when pf (set-cell! f i (value pf pi))))
-      :const nil
-      :call (when mine?
-              (let [args (inputs f (:in nd))]
-                (set-cell! f i (if (or (pending? args) (failure? args))
-                                 args
-                                 (try (apply (:f nd) args)
-                                      (catch #?(:clj Throwable :cljs :default) e (failure e)))))))
-      :watch (when mine? (set-cell! f i (try (compute-watch f i nd)
-                                             (catch #?(:clj Throwable :cljs :default) e (failure e)))))
-      :effect (when mine? (set-cell! f i (compute-effect f i nd)))
-      :shared (when mine? (set-cell! f i (compute-shared f i nd)))
-      :branch (set-cell! f i (compute-branch f i nd))
-      :mount (set-cell! f i (compute-mount f i nd))
-      :for (set-cell! f i (compute-for f i nd)))))
+;; ---- plans: the table is data on the wire and in the bundle; on first use a
+;; peer turns each ctor into one specialised step fn per node it computes,
+;; cached per (ctor, site). This removes per-node dispatch and lookups from
+;; the propagation loop.
 
-(defn- process-frame! [f]
-  (let [^objects dirty (:dirty f)
+(defn- settled? [x] (not (or (pending? x) (failure? x))))
+
+#?(:clj
+   (defmacro guarded [& body]
+     `(try ~@body (catch ~(if (:ns &env) :default 'Throwable) e# (curve.runtime/failure e#)))))
+
+(defn- call-step [nd]
+  (let [g (:f nd) in (:in nd)]
+    (case (count in)
+      0 (fn [f i] (set-live! f i (guarded (g))))
+      1 (let [a (int (nth in 0))]
+          (fn [^Frame f i] (let [x (aget ^objects (.-vals f) a)]
+                      (set-live! f i (if (settled? x) (guarded (g x)) x)))))
+      2 (let [a (int (nth in 0)) b (int (nth in 1))]
+          (fn [^Frame f i] (let [^objects vs (.-vals f) x (aget vs a) y (aget vs b)]
+                      (set-live! f i (cond (not (settled? x)) x (not (settled? y)) y
+                                           :else (guarded (g x y)))))))
+      3 (let [a (int (nth in 0)) b (int (nth in 1)) c (int (nth in 2))]
+          (fn [^Frame f i] (let [^objects vs (.-vals f) x (aget vs a) y (aget vs b) z (aget vs c)]
+                      (set-live! f i (cond (not (settled? x)) x (not (settled? y)) y (not (settled? z)) z
+                                           :else (guarded (g x y z)))))))
+      (fn [f i] (let [args (inputs f in)]
+                  (set-live! f i (if (settled? args) (guarded (apply g args)) args)))))))
+
+(defn- step [peer site nd]
+  (let [s (let [x (:site nd)] (if (= x :inherit) site x))
+        mine? (= s (:site peer))]
+    (case (:op nd)
+      :arg (fn [f i] (let [[pf pi] (get @(:arg-srcs f) i)]
+                       (when pf (set-cell! f i (value pf pi)))))
+      :const nil
+      :call (when mine? (call-step nd))
+      :watch (when mine? (fn [f i] (set-cell! f i (guarded (compute-watch f i nd)))))
+      :effect (when mine? (fn [f i] (set-cell! f i (compute-effect f i nd))))
+      :shared (when mine? (fn [f i] (set-cell! f i (compute-shared f i nd))))
+      :branch (fn [f i] (set-cell! f i (compute-branch f i nd)))
+      :mount (fn [f i] (set-cell! f i (compute-mount f i nd)))
+      :for (fn [f i] (set-cell! f i (compute-for f i nd))))))
+
+(defn- plan-for [peer ctor site]
+  (let [^objects cache (:plans peer)]
+    #?(:clj (let [m ^java.util.IdentityHashMap (get (aget cache 0) site)]
+              (or (.get m ctor)
+                  (let [p (object-array (map #(step peer site %) (:nodes ctor)))]
+                    (.put m ctor p)
+                    p)))
+       :cljs (let [m (get (aget cache 0) site)]
+               (or (.get m ctor)
+                   (let [p (object-array (map #(step peer site %) (:nodes ctor)))]
+                     (.set m ctor p)
+                     p))))))
+
+(defn- deps-of
+  "Same-frame dependents as int arrays, cached per ctor."
+  [peer ctor]
+  (let [^objects cache (:plans peer)
+        m (get (aget cache 0) :deps)]
+    (or (#?(:clj .get :cljs .get) m ctor)
+        (let [d (object-array (map #(int-array %) (:dependents ctor)))]
+          (#?(:clj .put :cljs .set) m ctor d)
+          d))))
+
+(defn- process-frame! [^Frame f]
+  (let [dirty #?(:clj ^booleans (.-dirty f) :cljs (.-dirty f))
+        ^objects plan (.-plan f)
         n (alength dirty)]
-    (loop [i 0]
-      (when (and (< i n) @(:alive f))
-        (when (aget dirty i)
-          (aset dirty i nil)
-          (compute! f i))
-        (recur (inc i))))))
+    (when @(.-alive f)
+      (loop [i 0]
+        (when (< i n)
+          (when (aget dirty i)
+            (aset dirty i false)
+            (when-let [st (aget plan i)] (st f i)))
+          (recur (inc i))))
+      (vreset! (.-queued f) false)
+      ;; something marked a lower index while we were past it
+      (when (loop [i 0] (cond (>= i n) false (aget dirty i) true :else (recur (inc i))))
+        (schedule-frame! f)))))
 
 (defn run!
   "Propagate until no frame is dirty. Parents before children (by depth)."
@@ -435,9 +554,11 @@
           (let [pid (out-id (:parent f))
                 id (vswap! (:next-wire-id peer) inc)]
             (vswap! (:out-ids peer) assoc (:seq-id f) id)
+            (vswap! (:out-frames peer) assoc id f)
             (vswap! (:outbox peer) update :decl (fnil conj []) [id pid (:node f) (:key f)])
             (on-cleanup! f (fn []
                              (vswap! (:out-ids peer) dissoc (:seq-id f))
+                             (vswap! (:out-frames peer) dissoc id)
                              (vswap! (:outbox peer) update :drop (fnil conj []) id)))
             id)))))
 
@@ -463,7 +584,9 @@
         cursor (when (and (vector? s) (= ::version (first s))) (second s))]
     (when-not (= cursor version)
       (when-let [bs (blob cursor version)]
-        (vswap! (:outbox (:peer f)) update :vals (fnil conj []) [(out-id f) i [:raw bs]]))
+        ;; out-id may append a frame declaration to the outbox: call it first
+        (let [id (out-id f)]
+          (vswap! (:outbox (:peer f)) update :vals (fnil conj []) [id i [:raw bs]])))
       (aset sent i [::version version]))))
 
 (defn- collect-out! [peer]
@@ -522,7 +645,7 @@
   (with-meta
    (fn [& args]
     (let [token (vswap! (:next-token peer) inc)
-          result (volatile! pending)
+          result (atom pending)
           id (or @(:remote-id f) (throw (ex-info "curve: remote fn frame unknown" {})))]
       (vswap! (:outbox peer) update :call (fnil conj []) [token id i (vec args)])
       (vswap! (:calls peer) assoc token result)
@@ -551,7 +674,8 @@
       (set-cell! f i v))))
 
 (defn- invoke-call! [peer [token id i args]]
-  (let [f (frame-by-in-id peer id)
+  ;; the caller names the frame by the id *we* declared for it
+  (let [f (get @(:out-frames peer) id)
         reply (fn [ok v] (vswap! (:outbox peer) update :ret (fnil conj []) [token ok v]))]
     (cond
       (nil? f) (reply false "frame not mounted")
@@ -588,7 +712,7 @@
   (doseq [[token ok v] ret]
     (when-let [r (get @(:calls peer) token)]
       (vswap! (:calls peer) dissoc token)
-      (vreset! r (if ok v (failure (ex-info (str v) {:remote true}))))
+      (reset! r (if ok v (failure (ex-info (str v) {:remote true}))))
       (when-let [cb (get @(:call-callbacks peer) token)] (cb @r)))))
 
 ;; ---------------------------------------------------------------- peer
@@ -606,6 +730,7 @@
                   :outbox (volatile! {})
                   :next-wire-id (volatile! 0)
                   :out-ids (volatile! {})
+                  :out-frames (volatile! {})
                   :in-frames (volatile! {})
                   :decls (volatile! {})
                   :stash (volatile! {})
@@ -613,6 +738,11 @@
                   :call-callbacks (volatile! {})
                   :next-token (volatile! 0)
                   :render-root? true
+                  :server-free (volatile! {})
+                  :plans (doto (object-array 1)
+                           (aset 0 #?(:clj {:client (java.util.IdentityHashMap.) :server (java.util.IdentityHashMap.)
+                                            :deps (java.util.IdentityHashMap.)}
+                                      :cljs {:client (js/Map.) :server (js/Map.) :deps (js/Map.)})))
                   :shared-acquire #?(:clj (fn [& args] (apply (requiring-resolve 'curve.shared/acquire!) args))
                                      :cljs (fn [& _] (throw (js/Error. "r/shared runs on the server"))))
                   :post! (fn [g] (g))}
@@ -626,6 +756,7 @@
   (let [f (mount-frame! peer ctor (or (:site ctor) :client) nil nil nil (mapv (fn [a] [:value a]) args))]
     (bind! peer f 0)
     (vreset! (:remote-id f) 0)
+    (vswap! (:out-frames peer) assoc 0 f)
     f))
 
 (defn frames [peer] (vals @(:frames peer)))

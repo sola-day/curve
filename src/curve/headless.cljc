@@ -113,12 +113,19 @@
          (and (or (= "" tag) (= tag (:tag n)))
               (every? (fn [[_ t v]] (if (= t "#") (= v (get @(:attrs n) "id")) (contains? classes v))) parts)))))
 
-(defn query-all
-  "Elements matching a simple selector (tag, .class, #id combined), document order."
-  [n sel]
+(defn- descendants-matching [roots sel]
   (let [acc (volatile! [])]
-    ((fn walk [x] (when (matches? x sel) (vswap! acc conj x)) (run! walk @(:children x))) n)
-    @acc))
+    (doseq [r roots]
+      (run! (fn walk [x] (when (matches? x sel) (vswap! acc conj x)) (run! walk @(:children x)))
+            @(:children r)))
+    (vec (distinct @acc))))
+
+(defn query-all
+  "Elements matching a selector of simple parts (tag, .class, #id) joined by
+  descendant spaces, in document order."
+  [n sel]
+  (reduce (fn [roots part] (descendants-matching roots part))
+          [n] (str/split (str/trim sel) #"\s+")))
 
 (defn query [n sel] (first (query-all n sel)))
 
