@@ -42,6 +42,10 @@
      (defmacro boundary "(r/boundary (fn [err retry] fallback) body) show fallback when body fails." [& body] (only-in-reactive &form))
      (defmacro suspense "(r/suspense fallback body) show fallback while body has pending values." [& body] (only-in-reactive &form))
      (defmacro -with-env [& body] (only-in-reactive &form))
+     (defmacro declassify
+       "(r/declassify expr \"reason\") let a secret value reach the client.
+       The reason is recorded in the boundary report."
+       [x _reason] x)
      (defmacro route "(r/route routes) the current route, matched on the client." [& body] (only-in-reactive &form))
      (defmacro defer
        "(r/defer {:when :idle|:interaction :placeholder hiccup} body)

@@ -821,6 +821,7 @@
 
 (defn- apply-val! [peer f i d]
   (when (authorized-val? peer f i)
+   (let [validate (when (= :server (:site peer)) (:validate (node-at f i)))]
     (let [[t x] d
           prev (value f i)
           v (case t
@@ -831,7 +832,9 @@
               :raw (let [d' (codec/decode-delta-blob x)]
                      (if (= :v (first d')) (second d') (delta/patch prev d')))
               (delta/patch prev d))]
-      (set-cell! f i v))))
+      ;; boundary schema: the server validates what the client sends
+      (when (or (nil? validate) (pending? v) (validate v))
+        (set-cell! f i v))))))
 
 (defn- invoke-call! [peer [token id i args]]
   ;; the caller names the frame by the id *we* declared for it
@@ -841,9 +844,12 @@
       (nil? f) (reply false "frame not mounted")
       (not= (node-site f (node-at f i)) (:site peer)) (reply false "not callable")
       :else
-      (let [g (value f i)]
-        (if-not (fn? g)
-          (reply false "not callable")
+      (let [g (value f i)
+            valid? (or (nil? (:validate (node-at f i))) (apply (:validate (node-at f i)) args))]
+        (cond
+          (not (fn? g)) (reply false "not callable")
+          (not valid?) (reply false "invalid arguments")
+          :else
           (try (let [r (apply g args)]
                  (reply true (if (fn? r) nil r)))
                (catch #?(:clj Throwable :cljs :default) e

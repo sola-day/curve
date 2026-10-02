@@ -6,8 +6,10 @@
   Strategy: any subform that contains no reactive construct is lifted whole
   into one host fn node whose inputs are the reactive locals it mentions.
   Only forms that do contain reactive constructs are taken apart."
-  (:require [clojure.string]
-            [clojure.walk]))
+  (:require [clojure.pprint]
+            [clojure.string]
+            [clojure.walk]
+            [curve.taint]))
 
 (defonce ^{:doc "Qualified symbols of every reactive fn seen so far."} registry (atom #{}))
 
@@ -26,7 +28,8 @@
         (if expander
           {:name (symbol expander) :macro true}
           (when-let [v ((requiring-resolve 'cljs.analyzer.api/resolve) menv sym)]
-            {:name (:name v) :dynamic (boolean (:dynamic v))}))))))
+            {:name (:name v) :dynamic (boolean (:dynamic v))
+             :secret (boolean (or (:secret v) (:secret (:meta v))))}))))))
 
 (defn- host-resolve
   "{:name qualified-sym :macro bool} for a global symbol, nil for host locals
@@ -37,7 +40,8 @@
     (when-not (contains? menv sym)
       (let [v (try (resolve sym) (catch Exception _ nil))]
         (when (var? v) {:name (symbol v) :macro (boolean (:macro (meta v)))
-                        :dynamic (boolean (:dynamic (meta v)))})))))
+                        :dynamic (boolean (:dynamic (meta v)))
+                        :secret (boolean (:secret (meta v)))})))))
 
 (defn- host-macroexpand-1 [menv form]
   (if (cljs? menv)
@@ -111,7 +115,7 @@
   '#{curve.core/server curve.core/client curve.core/for curve.core/watch curve.core/call
      curve.core/mutation curve.core/effect curve.core/suspense curve.core/boundary
      curve.core/binding curve.core/shared curve.core/offload curve.core/flow
-     curve.core/-with-env curve.core/route curve.core/defer})
+     curve.core/-with-env curve.core/route curve.core/defer curve.core/declassify})
 
 (defn- head-name [env h]
   (when (and (symbol? h) (not (local-name? env h)) (not (special-forms h)))
@@ -186,13 +190,17 @@
           body (if (seq renames) (clojure.walk/postwalk-replace renames form) form)]
       (add-node! (:b env) {:op :call :site (:site env)
                            :code `(fn [~@params] ~body) :in ids :form form
+                           :params params :pseudo body
                            :pure (pure-form? env form)
                            :eq (when (fresh-collection? form) :identical)}))))
 
 (defn- value-env [env] (assoc env :render? false))
 
-(defn- call-node [env code ids form]
-  (add-node! (:b env) {:op :call :site (:site env) :code code :in ids :form form}))
+(defn- call-node
+  ([env code ids form] (call-node env code ids form nil nil))
+  ([env code ids form params pseudo]
+   (add-node! (:b env) {:op :call :site (:site env) :code code :in ids :form form
+                        :params params :pseudo pseudo})))
 
 (defn- compile-call
   "Function call whose args contain reactive constructs."
@@ -202,9 +210,9 @@
         gs (vec (repeatedly (count args) #(gensym "a")))]
     (if (and (symbol? h) (local-name? env h))
       (let [hid (resolve-local env h) g (gensym "f")]
-        (call-node env `(fn [~g ~@gs] (~g ~@gs)) (into [hid] ids) form))
+        (call-node env `(fn [~g ~@gs] (~g ~@gs)) (into [hid] ids) form (into [g] gs) `(~g ~@gs)))
       (if (reactive-free? env h)
-        (call-node env `(fn [~@gs] (~h ~@gs)) ids form)
+        (call-node env `(fn [~@gs] (~h ~@gs)) ids form gs `(~h ~@gs))
         (error! env form "reactive code in function position is not supported")))))
 
 (defn- compile-coll [env form]
@@ -212,10 +220,13 @@
         xs (if (map? form) (mapcat identity form) (seq form))
         ids (mapv #(compile-form venv %) xs)
         gs (vec (repeatedly (count ids) #(gensym "x")))
+        pseudo (cond (map? form) (apply hash-map gs)
+                     (set? form) (vec gs)
+                     :else (vec gs))
         code (cond (map? form) `(fn [~@gs] (hash-map ~@gs))
                    (set? form) `(fn [~@gs] (hash-set ~@gs))
                    :else `(fn [~@gs] (vector ~@gs)))]
-    (call-node env code ids form)))
+    (call-node env code ids form gs pseudo)))
 
 (defn- compile-child
   "Compile body as a child ctor (branch arm, for body). Returns
@@ -258,6 +269,8 @@
 (defn- compile-let [env [_ bindings & body]]
   (let [env (reduce (fn [e [sym init]]
                       (let [id (compile-form (value-env e) init)]
+                        (when (:secret (meta sym))
+                          (swap! (:nodes (:b e)) update id assoc :secret true))
                         (assoc-in e [:locals sym] id)))
                     env (partition 2 bindings))]
     (compile-body env body)))
@@ -375,6 +388,13 @@
           (contains? '#{curve.core/boundary curve.core/suspense curve.core/flow
                         curve.core/offload curve.core/mutation curve.core/route curve.core/defer} q)
           (compile-form env (rewrite q form))
+          (= q 'curve.core/declassify)
+          (let [[x reason] args]
+            (when-not (and (string? reason) (seq reason))
+              (error! env form "r/declassify needs a reason string"))
+            (let [id (compile-form env x)]
+              (swap! (:nodes (:b env)) update id assoc :declassified reason)
+              id))
           (= q 'curve.core/binding)
           (let [[bindings & body] args
                 venv (value-env env)
@@ -408,7 +428,7 @@
             (add-node! (:b env) {:op :mount :in ids :ctx-site (:site env)}))
           (contains? @registry q)
           (let [ids (mapv #(compile-form (value-env env) %) args)]
-            (add-node! (:b env) {:op :mount :ctor-sym h :in ids :ctx-site (:site env)}))
+            (add-node! (:b env) {:op :mount :ctor-sym h :ctor-sym-q q :in ids :ctx-site (:site env)}))
           (contains? '#{clojure.core/case cljs.core/case} q)
           (if (reactive-free? env form) (lift env form) (compile-case env form))
           (reactive-free? env form) (lift env form)
@@ -422,9 +442,17 @@
 (defn compile-form
   "Compile form; ^{:rate n} on a form becomes a send-rate hint on its node."
   [env form]
-  (let [id (compile-form* env form)]
-    (when-let [r (:rate (meta form))]
-      (swap! (:nodes (:b env)) update id assoc :rate r))
+  (let [id (compile-form* env form)
+        m (meta form)
+        tag! (fn [k v] (swap! (:nodes (:b env)) update id assoc k v))]
+    (when-let [r (:rate m)] (tag! :rate r))
+    (when-let [v (:validate m)] (tag! :validate v))
+    (when-let [sch (:schema m)]
+      (tag! :schema-keys (let [q (if (symbol? sch) (:name (host-resolve (:menv env) sch)) nil)
+                               value (cond (symbol? sch) (some-> q requiring-resolve var-get)
+                                           (cljs? (:menv env)) nil
+                                           :else (try (eval sch) (catch Exception _ nil)))]
+                           (if value (curve.taint/schema-secret-keys value) :all))))
     id))
 
 (defn compile-form* [env form]
@@ -647,8 +675,9 @@
     (case (:op nd)
       :arg base
       :const (assoc base :v (list 'quote (:v nd)))
-      (:call :effect) (assoc base :f (when (emit-code? target (:site nd)) (:code nd)))
-      :watch base
+      (:call :effect) (cond-> (assoc base :f (when (emit-code? target (:site nd)) (:code nd)))
+                        (and (:validate nd) (= target :clj)) (assoc :validate (:validate nd)))
+      :watch (cond-> base (and (:validate nd) (= target :clj)) (assoc :validate (:validate nd)))
       :shared (assoc base :ctor (emit-ctor target (:ctor nd)))
       :branch (cond-> (assoc base :ctors (mapv #(emit-ctor target %) (:ctors nd)) :args (:args nd))
                 (:sel nd) (assoc :sel (:sel nd))
@@ -693,6 +722,79 @@
 
 ;; ------------------------------------------------------------------ entry
 
+;; ------------------------------------------------------------------ security
+
+(defonce ^{:doc "qname -> set of arg positions whose value can reach the client."} reach (atom {}))
+(defonce ^{:doc "qname -> boundary entries (values crossing the network)."} boundary (atom {}))
+
+(defn- builder-info [b ret]
+  (let [render (or @(:render b) (derived-render b ret))]
+    {:ret ret :arg-ids @(:arg-ids b) :holes (:holes render)}))
+
+(defn- taint-ctx [menv qname]
+  (let [self (volatile! nil)
+        child-taint (fn [{cb :b cret :ret} arg-taints]
+                      (curve.taint/analyze @self @(:nodes cb) (builder-info cb cret) arg-taints))]
+    (vreset! self {:qname qname
+                   :resolve (fn [sym] (host-resolve menv sym))
+                   :reach #(get @reach % #{})
+                   :child-taint child-taint})
+    @self))
+
+(defn- check-taint!
+  "Fail compilation on a secret leak; then record which args reach the client."
+  [menv qname b ret nargs]
+  (let [ctx (taint-ctx menv qname)
+        nodes @(:nodes b)
+        info (builder-info b ret)]
+    (curve.taint/analyze ctx nodes info [])
+    (swap! reach assoc qname
+           (set (filter (fn [k]
+                          (try (curve.taint/analyze ctx nodes info (assoc (vec (repeat nargs nil)) k :all))
+                               false
+                               (catch clojure.lang.ExceptionInfo e
+                                 (if (= :curve.taint/leak (:type (ex-data e))) true (throw e)))))
+                        (range nargs))))))
+
+(defn- record-boundary!
+  "Every value that crosses the network, for review (design §11.3)."
+  [qname b ret]
+  (let [entries (volatile! [])]
+    ((fn walk [b ret path]
+       (let [nodes @(:nodes b)
+             holes (:holes (builder-info b ret))
+             hole-ids (set (keep (fn [[k _ x y]] (when (not= :child k) (if (contains? #{:attr :event} k) y x))) holes))
+             readers (with-readers nodes)]
+         (doseq [[i nd] (map-indexed vector readers)]
+           (let [from (:site nd)
+                 to (cond-> (set (:readers nd)) (contains? hole-ids i) (conj :client))
+                 crosses (and (contains? #{:server :client} from)
+                              (some #(and (not= % from) (not= % :inherit)) to))]
+             (when (or crosses (and (= from :server) (contains? to :inherit)))
+               (vswap! entries conj (cond-> {:fn qname :path path :op (:op nd)
+                                             :form (pr-str (:form nd)) :from from
+                                             :to (vec (sort (disj to from)))}
+                                      (:line (meta (:form nd))) (assoc :line (:line (meta (:form nd))))
+                                      (:declassified nd) (assoc :declassified (:declassified nd))
+                                      (:validate nd) (assoc :validated true))))))
+         (doseq [[i nd] (map-indexed vector nodes)]
+           (doseq [c (concat (:ctors nd) (when (:ctor nd) [(:ctor nd)]))]
+             (walk (:b c) (:ret c) (conj path i))))))
+     b ret [])
+    (swap! boundary assoc qname @entries)))
+
+(defn boundary-report
+  "All recorded network crossings, sorted by fn."
+  []
+  (vec (mapcat val (sort-by key @boundary))))
+
+(defn write-info!
+  "Write the boundary report (and taint reach) to path, e.g. curve-info.edn."
+  [path]
+  (spit path (with-out-str
+               (clojure.pprint/pprint {:boundary (boundary-report)
+                                       :args-reaching-client (into (sorted-map) @reach)}))))
+
 (defonce ^:private cache (atom {}))
 
 (declare compile-defn*)
@@ -723,6 +825,9 @@
                         (assoc-in e [:locals p] id)))
                     env syms)
         ret (compile-form env body)]
+    (when (= target :clj)
+      (check-taint! menv qname b ret (count syms))
+      (record-boundary! qname b ret))
     (emit-ctor target {:b b :ret ret :name qname
                        :site (when (not= site :inherit) site)})))
 
