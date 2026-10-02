@@ -1,7 +1,8 @@
 (ns curve.core
   "User-facing API: r/defn and the reactive forms."
   (:refer-clojure :exclude [defn for binding])
-  (:require [curve.runtime :as rt]
+  (:require [curve.router]
+            [curve.runtime :as rt]
             #?(:clj [curve.compiler :as c]))
   #?(:cljs (:require-macros [curve.core])))
 
@@ -20,8 +21,10 @@
              m (meta name)
              site (cond (:server m) :server (:client m) :client)]
          (swap! c/registry conj qname)
-         `(def ~(vary-meta name assoc ::reactive true :doc doc)
-            ~(c/compile-defn &env qname params body {:site site}))))
+         `(do (def ~(vary-meta name assoc ::reactive true :doc doc)
+                ~(c/compile-defn &env qname params body {:site site}))
+              (rt/register-ctor! ~name)
+              (var ~name))))
 
      (clojure.core/defn- only-in-reactive [form]
        (throw (ex-info (str "curve: " (first form) " is only valid inside r/defn") {:form form})))
@@ -39,6 +42,11 @@
      (defmacro boundary "(r/boundary (fn [err retry] fallback) body) show fallback when body fails." [& body] (only-in-reactive &form))
      (defmacro suspense "(r/suspense fallback body) show fallback while body has pending values." [& body] (only-in-reactive &form))
      (defmacro -with-env [& body] (only-in-reactive &form))
+     (defmacro route "(r/route routes) the current route, matched on the client." [& body] (only-in-reactive &form))
+     (defmacro defer
+       "(r/defer {:when :idle|:interaction :placeholder hiccup} body)
+       mount body later. A deferred subtree is also a natural code-split point."
+       [& body] (only-in-reactive &form))
      (defmacro shared
        "(r/shared key body...) a server value computed once per process for
        each distinct key (and captured values) and followed by every session."

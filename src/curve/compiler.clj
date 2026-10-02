@@ -111,7 +111,7 @@
   '#{curve.core/server curve.core/client curve.core/for curve.core/watch curve.core/call
      curve.core/mutation curve.core/effect curve.core/suspense curve.core/boundary
      curve.core/binding curve.core/shared curve.core/offload curve.core/flow
-     curve.core/-with-env})
+     curve.core/-with-env curve.core/route curve.core/defer})
 
 (defn- head-name [env h]
   (when (and (symbol? h) (not (local-name? env h)) (not (special-forms h)))
@@ -319,6 +319,17 @@
     `(curve.core/server
        (curve.core/flow (fn [emit#] (curve.runtime/offload! (fn [] ~@args) emit#))))
 
+    curve.core/route
+    (let [[routes] args]
+      `(curve.core/client (curve.router/match ~routes (curve.core/watch curve.router/*location*))))
+
+    curve.core/defer
+    (let [[opts & body] (if (map? (first args)) args (cons {} args))]
+      `(let [!ready# (curve.core/client (atom false))
+             ready# (curve.core/watch !ready#)]
+         (curve.core/client (curve.core/effect (curve.runtime/defer! ~opts (fn [] (reset! !ready# true)))))
+         (if ready# (do ~@body) ~(:placeholder opts))))
+
     curve.core/mutation
     (let [[f] args]
       `(let [g# (curve.core/server ~f)]
@@ -356,7 +367,7 @@
           (let [rid (compile-form (value-env env) (first args))]
             (add-node! (:b env) {:op :watch :site (:site env) :in [rid]}))
           (contains? '#{curve.core/boundary curve.core/suspense curve.core/flow
-                        curve.core/offload curve.core/mutation} q)
+                        curve.core/offload curve.core/mutation curve.core/route curve.core/defer} q)
           (compile-form env (rewrite q form))
           (= q 'curve.core/binding)
           (let [[bindings & body] args

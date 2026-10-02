@@ -4,6 +4,7 @@
   (:require [curve.codec :as codec]
             [curve.dom :as dom]
             [curve.mount :as mount]
+            [curve.router :as router]
             [curve.runtime :as rt]))
 
 (defn- default-url []
@@ -12,7 +13,8 @@
 
 (defn start!
   "Mount ctor into container and connect. Returns a handle with :peer."
-  [ctor & {:keys [url container]}]
+  [ctor & {:keys [url container router?] :or {router? true}}]
+  (when router? (router/install!))
   (let [container (or container (.getElementById js/document "app") (.-body js/document))
         hooks (mount/renderer (dom/dom) container)
         up (codec/link)

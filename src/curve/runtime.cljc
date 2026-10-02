@@ -62,6 +62,16 @@
                      {} (map-indexed vector nodes))]
     (assoc m :dependents (mapv #(get deps % []) (range (count nodes))))))
 
+;; ---- reactive fns by name: they cross the wire as references, so a ctor
+;; held in a value (e.g. loaded lazily from a code-split module) can be
+;; mounted with r/call on both peers
+
+(defonce ^:private ctors (atom {}))
+
+(defn register-ctor! [c] (swap! ctors assoc (:name c) c) c)
+(defn ctor-by-name [n] (get @ctors n))
+(defn ctor? [x] (and (map? x) (contains? x :nodes) (contains? x :dependents)))
+
 (defn- node-at [f i] (nth (:nodes (:ctor f)) i))
 
 (defn- resolve-site
@@ -668,6 +678,7 @@
                        #?(:clj (if (instance? Throwable e) (or (ex-message e) (str e)) (str e))
                           :cljs (if (instance? js/Error e) (.-message e) (str e))))]
     (fn? v) (when-not (fn? prev) [:f])
+    (ctor? v) [:v {::ctor (:name v)}]
     (or (pending? prev) (failure? prev) (fn? prev) (= prev ::unsent)) [:v v]
     :else (delta/diff prev v)))
 
@@ -763,7 +774,7 @@
               :p pending
               :e (failure (ex-info x {:remote true}))
               :f (remote-proxy peer f i)
-              :v x
+              :v (if (and (map? x) (contains? x ::ctor)) (ctor-by-name (::ctor x)) x)
               :raw (let [d' (codec/decode-delta-blob x)]
                      (if (= :v (first d')) (second d') (delta/patch prev d')))
               (delta/patch prev d))]
@@ -856,6 +867,22 @@
     f))
 
 (defn frames [peer] (vals @(:frames peer)))
+
+(defn defer!
+  "Call ready! when :when happens: :idle (default) or :interaction (first
+  pointer or key event). :visible is accepted but currently behaves like
+  :idle (the placeholder element is not yet observed). Immediately on the
+  JVM. Returns a cleanup fn."
+  [{:keys [when] :or {when :idle}} ready!]
+  #?(:clj (do (ready!) nil)
+     :cljs (case when
+             :interaction (let [f (fn [] (ready!))
+                                evs ["pointerdown" "keydown" "touchstart"]]
+                            (doseq [e evs] (.addEventListener js/document e f #js {:once true}))
+                            #(doseq [e evs] (.removeEventListener js/document e f)))
+             (if (exists? js/requestIdleCallback)
+               (let [id (js/requestIdleCallback ready!)] #(js/cancelIdleCallback id))
+               (let [id (js/setTimeout ready! 1)] #(js/clearTimeout id))))))
 
 (defn offload!
   "Run thunk off the calling thread (a virtual thread on the JVM) and emit
