@@ -94,7 +94,15 @@
         (vswap! (:queue peer) assoc [(:depth f) (:seq-id f)] f)
         (when-let [hook (:on-schedule peer)] (hook))))))
 
+(defonce ^{:doc "Development tracing (curve.dev): nil when off."} trace (volatile! nil))
+
+(defn- trace-cause! [f i]
+  (when-let [t @trace]
+    (when-let [c (:current @t)]
+      (vswap! t assoc-in [:causes [(:seq-id f) i]] c))))
+
 (defn mark-dirty! [f i]
+  (trace-cause! f i)
   (when @(:alive f)
     (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true)
     (schedule-frame! f)))
@@ -135,12 +143,24 @@
 
 (declare export! queue-send!)
 
+(defn- trace-change! [t ^Frame f i ^ints deps]
+  (let [k [(.-seq-id f) i]]
+    (vswap! t (fn [s]
+                (-> s
+                    (update :log (fn [l] (let [l (conj l {:cell k :ctor (:name (.-ctor f))
+                                                          :value (aget ^objects (.-vals f) i)})]
+                                           (if (> (count l) 1000) (subvec l (- (count l) 1000)) l))))
+                    (update :causes (fn [c] (reduce #(assoc %1 [(.-seq-id f) %2] k) c deps)))
+                    (assoc :current k))))))
+
 (defn- changed!
   "Cell (f, i) took a new value: wake local readers and remote ones."
   [^Frame f i]
   (let [i (int i)
         ^ints deps (aget ^objects (.-deps f) i)
-        n (alength deps)]
+        n (alength deps)
+        t @trace]
+    (when t (trace-change! t f i deps))
     (when (pos? n)
       (let [dirty (.-dirty f)]
         (dotimes [k n] (aset #?(:clj ^booleans dirty :cljs dirty) (aget deps k) true)))
@@ -150,7 +170,8 @@
     (when-let [s (aget ^objects (.-subs f) i)]
       (doseq [cb @s] (cb)))
     (when (aget ^objects (.-exported f) i)
-      (queue-send! f i))))
+      (queue-send! f i))
+    (when t (vswap! t dissoc :current))))
 
 (defn- same-value? [a b]
   (or (identical? a b)
@@ -533,7 +554,11 @@
           (when-not (identical? old-ref r) (unwatch)))
         (when-not (identical? r (first (get @(:watching f) i)))
           (let [k (gensym "curve-watch")]
-            (add-watch r k (fn [_ _ _ _] ((:post! (:peer f)) #(mark-dirty! f i))))
+            (add-watch r k (fn [_ _ _ _]
+                             ((:post! (:peer f))
+                              #(do (when-let [t @trace] (vswap! t assoc :current [:watch (str r)]))
+                                   (mark-dirty! f i)
+                                   (when-let [t @trace] (vswap! t dissoc :current))))))
             (let [unwatch #(remove-watch r k)]
               (vswap! (:watching f) assoc i [r unwatch])
               (on-cleanup! f unwatch))))
@@ -844,6 +869,7 @@
               (delta/patch prev d))]
       ;; boundary schema: the server validates what the client sends
       (when (or (nil? validate) (pending? v) (validate v))
+        (when-let [t @trace] (vswap! t assoc-in [:causes [(:seq-id f) i]] [:remote (other-site (:site peer))]))
         (set-cell! f i v))))))
 
 (defn- invoke-call! [peer [token id i args]]
