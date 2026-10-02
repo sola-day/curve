@@ -38,7 +38,7 @@
 
 ;; ---------------------------------------------------------------- frames
 
-(defrecord Frame [peer ctor parent node key depth seq-id
+(defrecord Frame [peer ctor site parent node key depth seq-id
                   ^objects vals ^objects dirty ^objects subs ^objects exported ^objects sent
                   children cleanups remote-id alive arg-srcs order watching effects])
 
@@ -56,6 +56,16 @@
     (assoc m :dependents (mapv #(get deps % []) (range (count nodes))))))
 
 (defn- node-at [f i] (nth (:nodes (:ctor f)) i))
+
+(defn- resolve-site
+  "Sites in the table are :client, :server, :inherit (the frame's site) or
+  nil (computed identically on both peers)."
+  [f s]
+  (if (= s :inherit) (:site f) s))
+
+(defn node-site [f nd] (resolve-site f (:site nd)))
+
+(defn- arg-id [ctor k] (nth (:arg-ids ctor) k k))
 (defn value [f i] (aget ^objects (:vals f) i))
 
 (defn- schedule-frame! [f]
@@ -106,9 +116,9 @@
 
 (declare mount-frame! unmount-frame! compute!)
 
-(defn- new-frame [peer ctor parent node key]
+(defn- new-frame [peer ctor site parent node key]
   (let [n (count (:nodes ctor))]
-    (->Frame peer ctor parent node key
+    (->Frame peer ctor site parent node key
              (if parent (inc (:depth parent)) 0)
              (vswap! (:seq peer) inc)
              (object-array n) (object-array n) (object-array n) (object-array n) (object-array n)
@@ -118,19 +128,20 @@
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."
   [child k src]
-  (if (= :value (first src))
-    (aset ^objects (:vals child) k (second src))
-    (let [[pf pi] src]
-      (aset ^objects (:vals child) k (value pf pi))
-      (vswap! (:arg-srcs child) assoc k [pf pi])
-      (on-cleanup! child (subscribe! pf pi #(mark-dirty! child k))))))
+  (let [k (arg-id (:ctor child) k)]
+    (if (= :value (first src))
+      (aset ^objects (:vals child) k (second src))
+      (let [[pf pi] src]
+        (aset ^objects (:vals child) k (value pf pi))
+        (vswap! (:arg-srcs child) assoc k [pf pi])
+        (on-cleanup! child (subscribe! pf pi #(mark-dirty! child k)))))))
 
 (defn- children-of [f i] (get @(:children f) i))
 
 (defn mount-frame!
   "Instantiate ctor as a child of (parent, node, key) with arg sources."
-  [peer ctor parent node key arg-srcs]
-  (let [f (new-frame peer ctor parent node key)
+  [peer ctor site parent node key arg-srcs]
+  (let [f (new-frame peer ctor site parent node key)
         nodes (:nodes ctor)]
     (dotimes [i (count nodes)] (aset ^objects (:vals f) i pending))
     (doseq [[k src] (map-indexed vector arg-srcs)] (arg-source f k src))
@@ -184,7 +195,7 @@
         (doseq [c (kids-seq (children-of f i))]
           (remote-read! c (:ret (:ctor c)))))
 
-      (= (:site nd) (:site peer))
+      (= (node-site f nd) (:site peer))
       (when-not (aget ^objects (:exported f) i)
         (aset ^objects (:exported f) i true)
         (when-not (pending? (value f i)) (queue-send! f i)))
@@ -194,7 +205,7 @@
 (defn- export! [f]
   (let [other (other-site (:site (:peer f)))]
     (doseq [[i nd] (map-indexed vector (:nodes (:ctor f)))]
-      (when (contains? (:readers nd) other)
+      (when (some #(= other (resolve-site f %)) (:readers nd))
         (remote-read! f i)))))
 
 ;; ---------------------------------------------------------------- compute
@@ -220,7 +231,9 @@
       (remote-read! c r))))
 
 (defn- mount-child! [f i ctor key arg-srcs]
-  (let [c (mount-frame! (:peer f) ctor f i key arg-srcs)]
+  (let [nd (node-at f i)
+        site (or (resolve-site f (:ctx-site nd)) (:site f))
+        c (mount-frame! (:peer f) ctor site f i key arg-srcs)]
     (link-child! f i c)
     c))
 
@@ -239,15 +252,15 @@
           (child-ret-value cur)
           (do (when cur (unmount-frame! cur))
               (if-let [ctor (nth (:ctors nd) sel nil)]
-                (let [srcs (arg-srcs f (:args nd))
+                (let [srcs (arg-srcs f (nth (:args nd) sel))
                       c (mount-child! f i ctor sel srcs)]
                   (vswap! (:children f) assoc i c)
                   (child-ret-value c))
                 (do (vswap! (:children f) dissoc i) nil))))))))
 
 (defn- compute-mount [f i nd]
-  (let [[ctor ids key] (if (:ctor nd)
-                         [(:ctor nd) (:in nd) (:name (:ctor nd))]
+  (let [[ctor ids key] (if-let [c (or (:ctor nd) (when-let [t (:ctor-fn nd)] (t)))]
+                         [c (:in nd) (:name c)]
                          (let [c (value f (first (:in nd)))]
                            [c (rest (:in nd)) (when (map? c) (:name c))]))
         cur (children-of f i)]
@@ -282,7 +295,7 @@
         (doseq [[k c] cur] (when-not (contains? kset k) (unmount-frame! c)))
         (let [kids (reduce (fn [m [k x]]
                              (if-let [c (get cur k)]
-                               (do (set-cell! c 0 x) (assoc m k c))
+                               (do (set-cell! c (arg-id (:ctor c) 0) x) (assoc m k c))
                                (assoc m k (mount-child! f i (:ctor nd) k
                                                         (into [[:value x]] captures)))))
                            {} (map vector ks items))]
@@ -319,7 +332,7 @@
 (defn compute! [f i]
   (let [nd (node-at f i)
         peer (:peer f)
-        mine? (= (:site nd) (:site peer))]
+        mine? (= (node-site f nd) (:site peer))]
     (case (:op nd)
       :arg (let [[pf pi] (get @(:arg-srcs f) i)]
              (when pf (set-cell! f i (value pf pi))))
@@ -447,7 +460,7 @@
 (defn- authorized-val? [peer f i]
   ;; only accept values for nodes the sender owns
   (let [nd (node-at f i)]
-    (and (= (:site nd) (other-site (:site peer)))
+    (and (= (node-site f nd) (other-site (:site peer)))
          (not (link-op? (:op nd))))))
 
 (defn- apply-val! [peer f i d]
@@ -467,7 +480,7 @@
         reply (fn [ok v] (vswap! (:outbox peer) update :ret (fnil conj []) [token ok v]))]
     (cond
       (nil? f) (reply false "frame not mounted")
-      (not= (:site (node-at f i)) (:site peer)) (reply false "not callable")
+      (not= (node-site f (node-at f i)) (:site peer)) (reply false "not callable")
       :else
       (let [g (value f i)]
         (if-not (fn? g)
@@ -532,11 +545,15 @@
       :apply-val (fn [f i d] (apply-val! p f i d)))))
 
 (defn mount-root!
-  "Mount ctor as the root frame. args are plain values."
+  "Mount ctor as the root frame. args are plain values. The root's default
+  site is :client unless the ctor says otherwise."
   [peer ctor & args]
-  (let [f (mount-frame! peer ctor nil nil nil (mapv (fn [a] [:value a]) args))]
+  (let [f (mount-frame! peer ctor (or (:site ctor) :client) nil nil nil (mapv (fn [a] [:value a]) args))]
     (bind! peer f 0)
     (vreset! (:remote-id f) 0)
+    ;; the root's value is what the client renders
+    (when (and (= :server (:site peer)) (:ret ctor))
+      (remote-read! f (:ret ctor)))
     f))
 
 (defn frames [peer] (vals @(:frames peer)))

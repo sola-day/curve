@@ -37,7 +37,7 @@
     {:name 'branch :nargs 0 :ret 2
      :nodes [{:op :const :v !user}
              {:op :watch :site :server :in [0] :readers #{:client :server}}
-             {:op :branch :in [1] :ctors [child-ctor other-ctor] :args [1] :readers #{}}]}))
+             {:op :branch :in [1] :ctors [child-ctor other-ctor] :args [[1] []] :readers #{}}]}))
 
 (deftest branch-switches-child-frames
   (let [!user (atom nil)
