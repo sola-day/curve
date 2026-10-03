@@ -25,6 +25,7 @@ site), dependents as int arrays and a per-frame queued flag brought it down.
 | 2026-10-03 | M6 | examples/hello | 217.9 KB | 49.3 KB |
 | 2026-10-03 | M8 | examples/todomvc | — | 53.1 KB |
 | 2026-10-03 | M8 | examples/sqlite-table | — | 52.6 KB |
+| 2026-10-03 | M25 | examples/hello (with SSR resume, reliable transport, router) | — | 64.1 KB |
 
 Each bundle includes cljs.core; no server code appears in any of them.
 
@@ -63,3 +64,20 @@ server does not instantiate them (demand-driven, design §8.6 item 8).
 | Streaming series, 100,000 points, 1 s buckets | append one point (incremental) | 0.002 ms |
 | same | full recomputation | 32.9 ms |
 | Notebook | compile + load a cell at run time | 0.7 ms |
+
+## js-framework-benchmark style ratios (M25)
+
+Curve vs direct manipulation of the same headless DOM tree; CI fails when a
+ratio exceeds 1.5x `bench/baseline.edn`. The direct baseline does only the
+minimal DOM work, so these ratios are the framework's overhead factor.
+
+| Operation | Ratio |
+|---|---|
+| create 1000 rows | 26.6 |
+| update every 10th row | 20.1 |
+| select a row (curve.select, O(1)) | 56.2 |
+| swap two rows | 18.6 |
+| clear 1000 rows | 15.9 |
+
+Before M25 fixes: select 2944 (every row re-read the selection), swap 3400
+(full reorder walk).
