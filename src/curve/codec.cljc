@@ -108,7 +108,7 @@
 (def ^:private T-MAP 9) (def ^:private T-SET 10) (def ^:private T-SYM 11)
 (def ^:private T-INST 12) (def ^:private T-UUID 13)
 (def ^:private T-SHAPE-NEW 14) (def ^:private T-SHAPE-REF 15)
-(def ^:private T-F64 16) (def ^:private T-I32 17)
+(def ^:private T-F64 16) (def ^:private T-I32 17) (def ^:private T-LIST 18)
 
 (defn- safe-int? [x]
   #?(:clj (and (integer? x) (instance? Long (try (long x) (catch Exception _ nil))))
@@ -175,7 +175,9 @@
       #?(:clj (let [bb (ByteBuffer/allocate (* 4 n))] (dotimes [i n] (.putInt bb (aget a i))) (put-bytes! o (.array bb)))
          :cljs (put-bytes! o (js/Uint8Array. (.slice (.-buffer a) (.-byteOffset a) (+ (.-byteOffset a) (* 4 n)))))))
     (set? x) (do (put! o T-SET) (uvarint! o (count x)) (doseq [v x] (write-value! st o v)))
-    (or (vector? x) (seq? x)) (do (put! o T-VEC) (uvarint! o (count x)) (doseq [v x] (write-value! st o v)))
+    (vector? x) (do (put! o T-VEC) (uvarint! o (count x)) (doseq [v x] (write-value! st o v)))
+    ;; seqs stay seqs (code as data: dynamic program tables)
+    (seq? x) (do (put! o T-LIST) (uvarint! o (count x)) (doseq [v x] (write-value! st o v)))
     (symbol? x) (do (put! o T-SYM) (str! o (str x)))
     (inst? x) (do (put! o T-INST) (uvarint! o (zigzag (long (inst-ms x)))))
     (uuid? x) (do (put! o T-UUID) (str! o (str x)))
@@ -197,6 +199,7 @@
       T-SYM (symbol (read-str r))
       T-INST (let [ms (unzigzag (read-uvarint r))] #?(:clj (java.util.Date. (long ms)) :cljs (js/Date. ms)))
       T-UUID (parse-uuid (read-str r))
+      T-LIST (let [n (read-uvarint r)] (apply list (loop [i 0 acc []] (if (< i n) (recur (inc i) (conj acc (read-value st r))) acc))))
       T-SHAPE-NEW (let [n (read-uvarint r)
                         ks (loop [i 0 acc []] (if (< i n) (recur (inc i) (conj acc (read-value st r))) acc))]
                     (vswap! (:shapes st) conj ks)

@@ -6,6 +6,7 @@
   frames rendered into it. A range is never empty (the anchor itself is in
   it), so moving or removing a frame is a walk over its range."
   (:require [clojure.string :as str]
+            [curve.delta :as delta]
             [curve.dom-api :as d]
             [curve.runtime :as rt]))
 
@@ -109,12 +110,17 @@
                   (rt/on-cleanup! f (rt/subscribe! f id upd)))
         :foreign (let [[mf-id props-id] more
                        inst (volatile! nil)
+                       last-props (volatile! nil)
                        upd (fn []
                              (let [mf (rt/value f mf-id) props (rt/value f props-id)]
                                (when (and (fn? mf) (not (rt/pending? props)) (not (rt/failure? props)))
                                  (if-let [i @inst]
-                                   (when-let [u (:update i)] (u props))
-                                   (vreset! inst (mf node props))))))]
+                                   ;; diff-aware: the update also gets what changed
+                                   (if-let [pf (:patch i)]
+                                     (pf props (delta/diff @last-props props))
+                                     (when-let [u (:update i)] (u props)))
+                                   (vreset! inst (mf node props)))
+                                 (vreset! last-props props))))]
                    (upd)
                    (rt/on-cleanup! f (rt/subscribe! f props-id upd))
                    (rt/on-cleanup! f (rt/subscribe! f mf-id upd))

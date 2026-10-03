@@ -6,7 +6,8 @@
             [curve.runtime :as rt]
             [curve.session :as session]
             [curve.shared :as shared]
-            [curve.test :as ct]))
+            [curve.test :as ct]
+            [curve.virtual]))
 
 (defn- now [] (System/nanoTime))
 
@@ -165,10 +166,64 @@
    :shared-bytes-per-session (sessions-bytes SharedTable 1000)
    :private-bytes-per-session (sessions-bytes PrivateTable 1000)})
 
+(declare bench-scenarios)
+
 (defn -main [& args]
+  (when (= ["scenarios"] args)
+    (println "Scenarios:" (bench-scenarios))
+    (System/exit 0))
   (when-not (= ["sessions"] args)
     (println "A. interpreter overhead:" (bench-interpreter))
     (println "B/C. 1000-row table:" (bench-table)))
   (println "D. 1000 sessions on one 1000-row table:" (bench-sessions))
   (shutdown-agents)
   (System/exit 0))
+
+;; ---------------------------------------------------------------- scenarios (design §16)
+
+(def big (vec (for [i (range 100000)] {:id i :name (str "row " i)})))
+
+(r/defn BigRows [start end]
+  (r/for [row (r/server (subvec big start end)) :recycle true] [:div.row (:name row)]))
+
+(r/defn BigTable* []
+  (curve.virtual/Window {:total (r/server (count big)) :row-height 20 :height 600} BigRows))
+
+(def !shapes (atom []))
+
+(r/defn Shapes []
+  [:g (r/for [{:keys [id x y]} (r/server (r/watch !shapes)) :by :id] [:rect {:x x :y y :w 10 :h 10}])])
+
+(defn bench-scenarios []
+  (require 'curve.virtual 'curve.agg 'curve.dynamic)
+  (let [render (fn [ctor] (let [root (h/root) hooks (mount/renderer (h/dom) root)
+                                p (ct/mount! (ct/pair :client-opts (dissoc hooks :mounter)) ctor)]
+                            (ct/flush! p) (assoc p :dom-root root)))
+        ;; 1. 100k-row table: bytes per scroll step
+        p (render BigTable*)
+        _ (ct/clear-wire! p)
+        _ (h/fire! (h/query (:dom-root p) ".curve-window") "scroll" {:scroll-top 600000})
+        _ (ct/flush! p)
+        scroll-bytes (ct/bytes-sent p :s->c)
+        ;; 2. whiteboard: move one of 1000 shapes
+        _ (reset! !shapes (vec (for [i (range 1000)] {:id i :x i :y i})))
+        w (render Shapes)
+        _ (ct/clear-wire! w)
+        _ (swap! !shapes assoc-in [500 :x] 9999)
+        _ (ct/flush! w)
+        move-bytes (ct/bytes-sent w :s->c)
+        ;; 3. dataviz: append one point to a 100k series
+        series (vec (for [i (range 100000)] {:t (* i 10) :v i}))
+        b ((requiring-resolve 'curve.agg/bucketer) :sum :t 1000 :v)
+        _ (b series)
+        s2 (conj series {:t 1000000 :v 1})
+        !s (atom series)
+        inc-ns (measure 50 #(b (swap! !s conj {:t (+ 1000000 (count @!s)) :v 1})))
+        full-ns (measure 10 #(((requiring-resolve 'curve.agg/bucketer) :sum :t 1000 :v) s2))
+        ;; 4. notebook: compile + load a cell at run time
+        cell-ns (measure 20 #((requiring-resolve 'curve.dynamic/load)
+                              ((requiring-resolve 'curve.dynamic/compile-table) 'nb/c '[x] '([:pre (str (* 2 x))]))))]
+    {:table-100k-scroll-bytes scroll-bytes
+     :whiteboard-move-1-of-1000-bytes move-bytes
+     :series-100k-append (ms inc-ns) :series-100k-full (ms full-ns)
+     :notebook-cell-compile+load (ms cell-ns)}))

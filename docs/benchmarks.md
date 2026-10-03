@@ -53,3 +53,13 @@ server does not instantiate them (demand-driven, design §8.6 item 8).
 |---|---|
 | `r/shared` (one value, per-session cursor, encode once) | ~4 KB |
 | per-session query (fresh rows per session) | ~80 KB |
+
+## Scenarios (design §16), M24
+
+| Scenario | Measure | Result |
+|---|---|---|
+| 100,000-row table, virtual window | bytes per scroll jump (server → client) | 827 |
+| Whiteboard, 1000 shapes | bytes to move one shape | 18 |
+| Streaming series, 100,000 points, 1 s buckets | append one point (incremental) | 0.002 ms |
+| same | full recomputation | 32.9 ms |
+| Notebook | compile + load a cell at run time | 0.7 ms |

@@ -54,7 +54,9 @@
        [& body] (only-in-reactive &form))
      (defmacro foreign
        "(r/foreign mount props) give a DOM element to a JS component: (mount el
-       props) returns {:update (fn [props]) :unmount (fn [])}; props are reactive."
+       props) returns {:update (fn [props]) :unmount (fn [])}; props are reactive.
+       Diff-aware components return :patch (fn [props delta]) instead of
+       :update and receive what changed (curve.delta form)."
        [& body] (only-in-reactive &form))
      (defmacro declassify
        "(r/declassify expr \"reason\") let a secret value reach the client.
