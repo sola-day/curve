@@ -83,3 +83,53 @@
               (catch Throwable e
                 (println "curve.dev/reload-clj:" ns (ex-message e)))))
        build-state)))
+
+;; ------------------------------------------------------------------ wire, replay, tests
+;; These work on message logs: curve.test/wire-log, or a session recording
+;; (record-session!). Messages are plain data (a monoid), so a log can be
+;; measured, replayed to any point and turned into a regression test.
+
+#?(:clj
+   (defn wire-stats
+     "Per [direction node]: how many values crossed and roughly how many bytes
+     (each value encoded on its own)."
+     [log]
+     (let [codec-blob (requiring-resolve 'curve.codec/encode-delta-blob)]
+       (->> (for [{:keys [dir msg]} log
+                  [_ i d] (:vals msg)]
+              [[dir i] (alength ^bytes (codec-blob d))])
+            (reduce (fn [m [k n]] (-> m (update-in [k :count] (fnil inc 0)) (update-in [k :bytes] (fnil + 0) n))) {})
+            (sort-by (comp - :bytes val))
+            (into [])))))
+
+#?(:clj
+   (defn replay
+     "Time travel: a fresh client of ctor, on a headless DOM, fed the first n
+     server-to-client messages of log. Returns {:html :peer}."
+     ([ctor log] (replay ctor log Long/MAX_VALUE))
+     ([ctor log n]
+      (let [h (requiring-resolve 'curve.headless/root)
+            dom ((requiring-resolve 'curve.headless/dom))
+            html (requiring-resolve 'curve.headless/html)
+            renderer (requiring-resolve 'curve.mount/renderer)
+            root (h)
+            peer (apply rt/peer :client (mapcat identity (dissoc (renderer dom root) :mounter)))]
+        (rt/mount-root! peer ctor)
+        (rt/run! peer)
+        (doseq [{:keys [msg]} (take n (filter #(= :s->c (:dir %)) log))]
+          (rt/receive! peer msg)
+          (rt/run! peer))
+        {:html (html root) :peer peer}))))
+
+#?(:clj
+   (defn log->test
+     "A regression test (source) that replays log and checks the final page."
+     [test-name ctor-sym log]
+     (let [ctor @(requiring-resolve ctor-sym)
+           expected (:html (replay ctor log))
+           msgs (vec (map :msg (filter #(= :s->c (:dir %)) log)))]
+       (with-out-str
+         ((requiring-resolve 'clojure.pprint/pprint)
+          `(clojure.test/deftest ~test-name
+             (clojure.test/is (= ~expected
+                                 (:html (curve.dev/replay ~ctor-sym (mapv (fn [m#] {:dir :s->c :msg m#}) '~msgs)))))))))))

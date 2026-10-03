@@ -140,16 +140,36 @@
             parent (d/parent-of dom anchor)]
         (doseq [n (range-nodes m f)] (d/insert-before! dom parent n anchor))))))
 
+(defn- move-changed!
+  "Same keys, same length: move only the children whose position changed
+  (a swap moves two). Returns false when that shortcut does not apply."
+  [m f i anchor parent]
+  (let [order @(:order f)
+        ks (get order i)
+        prev (get order [:curve.runtime/prev i])
+        kids (get @(:children f) i)]
+    (if (and prev (= (count prev) (count ks)) (map? kids) (= (set prev) (set ks)))
+      (let [dom (:dom m)
+            n (count ks)
+            changed (filterv #(not= (nth prev %) (nth ks %)) (range n))]
+        (doseq [j (rseq changed)]
+          (let [c (get kids (nth ks j))
+                before (if (< (inc j) n) (first (range-nodes m (get kids (nth ks (inc j))))) anchor)]
+            (doseq [x (range-nodes m c)] (d/insert-before! dom parent x before))))
+        true)
+      false)))
+
 (defn- reorder! [m f i]
   (when-let [anchor (get-in @(:frames m) [(:seq-id f) :anchors i])]
     (let [dom (:dom m)
           parent (d/parent-of dom anchor)]
+     (when-not (move-changed! m f i anchor parent)
       (loop [cursor anchor kids (reverse (rt/ordered-children f i))]
         (when-let [c (first kids)]
           (let [ns (range-nodes m c)]
             (when-not (identical? (d/next-of dom (last ns)) cursor)
               (doseq [n ns] (d/insert-before! dom parent n cursor)))
-            (recur (first ns) (rest kids))))))))
+            (recur (first ns) (rest kids)))))))))
 
 (defn renderer
   "Peer hooks that render a client peer's frames into container."

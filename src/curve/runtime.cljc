@@ -23,7 +23,8 @@
   nest (branch, mount, for); a child's identity on both peers is the path
   (parent, node, key), so peers agree without coordination."
   (:refer-clojure :exclude [run!])
-  (:require [curve.clock :as clock]
+  (:require [clojure.string]
+            [curve.clock :as clock]
             [curve.codec :as codec]
             [curve.delta :as delta])
   #?(:cljs (:require-macros [curve.runtime :refer [guarded]])))
@@ -550,7 +551,7 @@
                                                         (into [[:value x]] captures)))))
                            {} (map vector ks items))]
           (vswap! (:children f) assoc i kids)
-          (vswap! (:order f) assoc i ks [::coll i] coll)
+          (vswap! (:order f) assoc i ks [::coll i] coll [::prev i] prev-ks)
           (when (not= ks prev-ks)
             (when-let [h (:on-children (:peer f))] (h f i)))
           (when (link-used? f i)
@@ -794,7 +795,12 @@
       (let [^objects sent (:sent f)
             prev (let [s (aget sent i)] (cond (nil? s) ::unsent (= s ::nil) nil :else s))
             v (value f i)
-            d (encode-value prev v)]
+            d (encode-value prev v)
+            ;; cross-site stack: say where on this side the error happened
+            d (if (and d (= :e (first d)))
+                [:e (str (second d) "\u0000" (name (:site peer)) " " (:name (:ctor f))
+                         (when-let [l (:line (node-at f i))] (str ":" l)))]
+                d)]
         (when d
           (aset sent i (if (nil? v) ::nil v))
           (let [id (out-id f)]
@@ -874,7 +880,9 @@
           prev (value f i)
           v (case t
               :p pending
-              :e (failure (ex-info x {:remote true}))
+              ;; message, then where it happened on the other side (ex-data :at)
+              :e (let [[msg at] (clojure.string/split x #"\u0000" 2)]
+                   (failure (ex-info msg (cond-> {:remote true} at (assoc :at at)))))
               :f (remote-proxy peer f i)
               :v (if (and (map? x) (contains? x ::ctor)) (ctor-by-name (::ctor x)) x)
               :raw (let [d' (codec/decode-delta-blob x)]

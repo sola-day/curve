@@ -713,7 +713,9 @@
                    (get-in [:options :curve/local-server]))))
 
 (defn- emit-node [target nd]
-  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq :state])]
+  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq :state])
+               ;; source location, for errors that cross sites
+               (:line (meta (:form nd))) (assoc :line (:line (meta (:form nd)))))]
     (case (:op nd)
       :arg base
       :const (assoc base :v (list 'quote (:v nd)))
@@ -766,7 +768,7 @@
 
 (defn emit-ctor
   "Emit code that builds the runtime ctor for a compiled builder."
-  [target {:keys [b ret name site extra]}]
+  [target {:keys [b ret name site extra file]}]
   (let [render (or @(:render b) (derived-render b ret))
         nodes (with-sids name (with-dead (with-readers @(:nodes b)) ret (:holes render)))]
     `(curve.runtime/ctor

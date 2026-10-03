@@ -6,6 +6,7 @@
     (def user-loader (batch/loader (fn [ids] (db/users-by-ids ids))))
     ;; in a reactive fn, on the server:
     (r/offload @(batch/load user-loader id))"
+  (:refer-clojure :exclude [load])
   (:import [java.util.concurrent CompletableFuture Executors ScheduledExecutorService ThreadFactory TimeUnit]))
 
 (defonce ^:private ^ScheduledExecutorService timer

@@ -77,3 +77,20 @@
       (h/fire! (h/query (:dom-root p) "button") "click" {})
       (ct/flush! p)
       (is (= 201 (count (h/query-all (:dom-root p) "li")))))))
+
+(def !perm (atom []))
+(r/defn Perm [] [:ul (r/for [x (r/watch !perm) :by identity] [:li x])])
+
+(deftest random-permutations-keep-dom-order
+  (reset! !perm (vec (range 30)))
+  (let [p (render-pair Perm)
+        lis #(mapv (comp parse-long h/text-content) (h/query-all (:dom-root p) "li"))
+        rnd (java.util.Random. 42)]
+    (dotimes [_ 200]
+      (let [v @!perm
+            v (if (zero? (.nextInt rnd 3))
+                (let [i (.nextInt rnd 30) j (.nextInt rnd 30)] (assoc v i (v j) j (v i)))
+                (vec (sort-by (fn [_] (.nextInt rnd 1000)) v)))]
+        (reset! !perm v)
+        (ct/flush! p)
+        (is (= v (lis)))))))

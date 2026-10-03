@@ -6,7 +6,7 @@
             [curve.dom-api :as api]))
 
 (defn- node [kind m]
-  (merge {:kind kind :parent (volatile! nil) :children (volatile! [])
+  (merge {:kind kind :parent (volatile! nil) :children (volatile! []) :index (volatile! nil)
           :attrs (volatile! {}) :props (volatile! {}) :text (volatile! nil)
           :listeners (volatile! {})}
          m))
@@ -61,7 +61,15 @@
   (parent-of [_ n] @(:parent n))
   (next-of [_ n]
     (when-let [p @(:parent n)]
-      (let [cs @(:children p) i (index-of cs n)] (get cs (inc i)))))
+      ;; position index rebuilt once per change of the children vector
+      (let [cs @(:children p)
+            idx (let [[v m] @(:index p)]
+                  (if (identical? v cs) m
+                      (let [m #?(:clj (let [m (java.util.IdentityHashMap.)] (dotimes [i (count cs)] (.put m (nth cs i) i)) m)
+                                 :cljs (let [m (js/Map.)] (dotimes [i (count cs)] (.set m (nth cs i) i)) m))]
+                        (vreset! (:index p) [cs m]) m)))
+            i #?(:clj (.get ^java.util.IdentityHashMap idx n) :cljs (.get idx n))]
+        (get cs (inc i)))))
   (set-text! [_ n s] (vreset! (:text n) s))
   (set-attr! [_ el k v]
     (if (contains? #{"value" "checked"} k)

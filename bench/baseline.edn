@@ -1,0 +1,7 @@
+;; js-framework-benchmark style ratios, Curve / direct DOM manipulation on the
+;; headless DOM (2026-10-03, M25). CI fails when a ratio exceeds 1.5x these.
+{:clear 15.9
+ :create-1k 26.6
+ :select 56.2
+ :swap-rows 18.6
+ :update-10th 20.1}
