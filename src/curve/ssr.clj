@@ -18,7 +18,8 @@
             [curve.router :as router]
             [curve.runtime :as rt]
             [curve.session :as session]
-            [curve.shared :as shared])
+            [curve.shared :as shared]
+            [curve.transport :as transport])
   (:import [java.util Base64]
            [java.util.concurrent ConcurrentLinkedQueue Executors LinkedBlockingQueue ScheduledExecutorService TimeUnit]))
 
@@ -57,20 +58,23 @@
     (binding [router/*location* location]
       (when url (router/set-location! url))
       (rt/mount-root! client ctor))
-    {:root root :posted posted :inbox inbox :session s :up up :down down :client client :location location}))
+    {:root root :posted posted :inbox inbox :session s :up up :down down :client client :location location
+     :transport (transport/state)}))
 
 (defn- step!
   "Run the client and exchange messages once. True if anything happened."
-  [{:keys [posted inbox session up down client location]} wait-ms]
+  [{:keys [posted inbox session up down client location transport]} wait-ms]
   (binding [router/*location* location]
     (loop [] (when-let [g (.poll ^ConcurrentLinkedQueue posted)] (g) (recur)))
     (rt/run! client)
-    (let [sent (when-let [m (rt/take-message! client)]
-                 (session/receive! session ((:encode up) m))
+    (let [deliver! (fn [frame] (when-let [data (:data (transport/receive transport frame))]
+                                 (rt/receive! client (codec/decode down data))))
+          sent (when-let [m (rt/take-message! client)]
+                 (session/receive! session (transport/data-frame transport ((:encode up) m)))
                  true)
           got (when-let [bs (.poll inbox wait-ms TimeUnit/MILLISECONDS)]
-                (rt/receive! client (codec/decode down bs))
-                (loop [] (when-let [bs (.poll inbox)] (rt/receive! client (codec/decode down bs)) (recur)))
+                (deliver! bs)
+                (loop [] (when-let [bs (.poll inbox)] (deliver! bs) (recur)))
                 (rt/run! client)
                 true)]
       (boolean (or sent got (not (.isEmpty ^ConcurrentLinkedQueue posted)))))))
@@ -108,9 +112,12 @@
   (session/call session (fn [] nil))
   (let [live? (live-server? session client)
         tier (cond live? :live (client-logic? client) :client :else :html)
+        tr (:transport st)
         state {:peer (rt/resume-snapshot client)
                :down (codec/export-state down)
                :up (codec/export-state (:enc up))
+               :transport {:in (transport/seen tr) :out @(:out-seq tr)}
+               :session (:token session)
                :static (not live?)}
         token (if live? (keep-detached! session grace-ms) (do (session/close! session) nil))]
     {:token token :tier tier

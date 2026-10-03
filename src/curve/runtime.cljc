@@ -314,7 +314,7 @@
             :const (aset ^objects (:vals f) i (:v nd))
             (cond
               (and state (contains? state sid))
-              (aset ^objects (:vals f) i (get state sid))
+              (aset ^objects (:vals f) i (revive peer f i (get state sid)))
               ;; resuming a server render: take the value, unless the node
               ;; must run to (re)build children, subscriptions or effects
               (and resumed (contains? resumed sid)
@@ -732,7 +732,8 @@
             (on-cleanup! f (fn []
                              (vswap! (:out-ids peer) dissoc (:seq-id f))
                              (vswap! (:out-frames peer) dissoc id)
-                             (vswap! (:outbox peer) update :drop (fnil conj []) id)))
+                             (when-not @(:silent peer)
+                               (vswap! (:outbox peer) update :drop (fnil conj []) id))))
             id)))))
 
 (defn- queue-send! [f i]
@@ -952,6 +953,7 @@
                   :out-frames (volatile! {})
                   :to-ack (volatile! 0)
                   :root-seed (volatile! nil)
+                  :silent (volatile! false)
                   :in-flight (volatile! 0)
                   :window nil
                   :clock clock/host
@@ -1017,8 +1019,15 @@
   (let [peer (:peer f)
         nodes (:nodes (:ctor f))
         portable-map (fn [arr]
-                       (into {} (keep (fn [i] (let [x (portable (aget ^objects arr i))]
-                                                (when-not (= x ::skip) [(:sid (nth nodes i)) x])))
+                       (into {} (keep (fn [i] (let [nd (nth nodes i)
+                                                    v (aget ^objects arr i)
+                                                    ;; an atom travels only when this node created it;
+                                                    ;; a reference to a shared atom is looked up again
+                                                    x (if (and (instance? #?(:clj clojure.lang.Atom :cljs cljs.core/Atom) v)
+                                                               (not (:state nd)))
+                                                        ::skip
+                                                        (portable v))]
+                                                (when-not (= x ::skip) [(:sid nd) x])))
                                       (range (count nodes)))))]
     {:vals (portable-map (:vals f))
      :sent (into {} (keep (fn [i] (let [s (aget ^objects (:sent f) i)]
@@ -1055,21 +1064,67 @@
       (on-cleanup! f (fn []
                        (vswap! (:out-ids peer) dissoc (:seq-id f))
                        (vswap! (:out-frames peer) dissoc out-id)
-                       (vswap! (:outbox peer) update :drop (fnil conj []) out-id))))))
+                       (when-not @(:silent peer)
+                         (vswap! (:outbox peer) update :drop (fnil conj []) out-id)))))))
 
 (defn resume!
-  "Restore a client peer from resume-snapshot and mount ctor with it."
-  [peer ctor {:keys [root next-wire-id decls]}]
+  "Restore a peer from resume-snapshot and mount ctor (with args) with it."
+  [peer ctor {:keys [root next-wire-id decls]} & args]
   (vreset! (:next-wire-id peer) next-wire-id)
   (vreset! (:decls peer) decls)
   (vreset! (:root-seed peer) root)
-  (let [f (mount-root! peer ctor)]
+  (let [f (apply mount-root! peer ctor args)]
     (vreset! (:root-seed peer) nil)
     f))
 
+(defn unmount-silently!
+  "Tear a frame tree down without telling the other peer (hibernation:
+  the other side keeps its frames and we come back with the same ids)."
+  [peer f]
+  (vreset! (:silent peer) true)
+  (try (unmount-frame! f) (finally (vreset! (:silent peer) false))))
+
+(defn fnv32
+  "FNV-1a over a string: the same number on the JVM and in JS (unlike hash)."
+  [^String s]
+  #?(:clj (loop [i 0 h 0x811c9dc5]
+            (if (< i (.length s))
+              (recur (inc i) (bit-and 0xffffffff (* (bit-xor h (long (.charAt s i))) 0x01000193)))
+              h))
+     :cljs (loop [i 0 h 0x811c9dc5]
+             (if (< i (.-length s))
+               (recur (inc i) (unsigned-bit-shift-right (js/Math.imul (bit-xor h (.charCodeAt s i)) 0x01000193) 0))
+               h))))
+
+(defn tree-version
+  "Hash of the structure of every program table reachable from ctor: the
+  JVM and browser builds of the same app agree, and any change that would
+  break the protocol (nodes, edges, sites, holes) changes it."
+  [ctor]
+  (let [seen (volatile! #{})
+        acc (volatile! [])]
+    ((fn walk [c]
+       (when (and c (not (contains? @seen (:name c))))
+         (vswap! seen conj (:name c))
+         ;; structure, not source text: platform-specific code (#?) differs
+         ;; between builds but the protocol is the same
+         (vswap! acc conj [(str (:name c)) (:ret c)
+                           ;; inputs are left out: platform code (#?) may read different
+                           ;; locals on each side without changing what crosses the wire
+                           (mapv (fn [nd] [(:op nd) (:site nd) (sort (:readers nd))
+                                           (:ctx-site nd) (when (:ctor-fn nd) (str (:name ((:ctor-fn nd)))))])
+                                 (:nodes c))
+                           (:holes (:render c))])
+         (doseq [nd (:nodes c)]
+           (doseq [c (:ctors nd)] (walk c))
+           (walk (:ctor nd))
+           (when-let [t (:ctor-fn nd)] (walk (t))))))
+     ctor)
+    (fnv32 (pr-str (sort-by first @acc)))))
+
 ;; ---- hot reload
 
-(defn- local-state? [nd] (and (= :call (:op nd)) (empty? (:in nd)) (:sid nd)))
+(defn- local-state? [nd] (and (= :call (:op nd)) (:state nd) (:sid nd)))
 
 (defn snapshot
   "Local state of a frame tree by stable ids: the values of input-less call

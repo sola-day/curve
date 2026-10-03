@@ -175,7 +175,7 @@
 
 (defn- const! [env v] (add-node! (:b env) {:op :const :v v}))
 
-(declare check-no-mutation! pure-form? fresh-collection?)
+(declare check-no-mutation! pure-form? fresh-collection? core-name)
 
 (defn- lift
   "One host fn node computing form from the reactive locals it mentions."
@@ -192,6 +192,9 @@
       (add-node! (:b env) {:op :call :site (:site env)
                            :code `(fn [~@params] ~body) :in ids :form form
                            :params params :pseudo body
+                           ;; creates per-frame state (kept by hot reload and resume)
+                           :state (boolean (and (seq? form) (empty? ids)
+                                                (contains? '#{atom volatile!} (some-> (core-name env (first form)) name symbol))))
                            :pure (pure-form? env form)
                            :eq (when (fresh-collection? form) :identical)}))))
 
@@ -696,7 +699,7 @@
   (or (= target :clj) (not= site :server)))
 
 (defn- emit-node [target nd]
-  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq])]
+  (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq :state])]
     (case (:op nd)
       :arg base
       :const (assoc base :v (list 'quote (:v nd)))

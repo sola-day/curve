@@ -17,23 +17,34 @@
   "Ring handler that upgrades to a websocket and runs (ctor args...) as a
   session. args-fn: request -> root args (e.g. the authenticated user, read
   from the session cookie; never from client-controlled input)."
-  [ctor & {:keys [args-fn on-error] :or {args-fn (constantly [])}}]
+  [ctor & {:keys [args-fn on-error grace-ms hibernate-ms] :or {args-fn (constantly []) grace-ms 30000}}]
   (fn [request]
     (if (ws/upgrade-request? request)
       (let [s (atom nil)
-            token (second (re-find #"(?:^|&)resume=([^&]+)" (or (:query-string request) "")))]
+            q (or (:query-string request) "")
+            param #(second (re-find (re-pattern (str "(?:^|&)" % "=([^&]+)")) q))
+            token (param "resume")
+            session-token (param "session")
+            seen (some-> (param "seen") parse-long)]
         {::ws/listener
          {:on-open (fn [socket]
                      (let [send! (fn [^bytes bs] (ws/send socket (ByteBuffer/wrap bs)))]
-                       (if-let [resumed (when token ((requiring-resolve 'curve.ssr/take-detached!) token))]
+                       (cond
                          ;; continue the session a server render started
-                         (do (reset! s resumed) (session/attach! resumed send!))
+                         (and token ((requiring-resolve 'curve.ssr/peek-detached) token))
+                         (let [resumed ((requiring-resolve 'curve.ssr/take-detached!) token)]
+                           (reset! s resumed) (session/attach! resumed send!))
+                         ;; a client coming back after a dropped connection
+                         (and session-token (reset! s (session/reconnect! session-token (or seen 0) send!)))
+                         nil
+                         :else
                          (reset! s (session/start! ctor (args-fn request)
                                                    {:send! send!
                                                     :on-error on-error
+                                                    :hibernate-ms hibernate-ms
                                                     :on-close #(try (ws/close socket) (catch Exception _ nil))})))))
           :on-message (fn [_ msg] (session/receive! @s (buffer->bytes msg)))
-          :on-close (fn [_ _ _] (some-> @s session/close!))
+          :on-close (fn [_ _ _] (some-> @s (session/connection-lost! grace-ms)))
           :on-error (fn [_ e] (when on-error (on-error e)) (some-> @s session/close!))}})
       {:status 400 :body "websocket expected"})))
 

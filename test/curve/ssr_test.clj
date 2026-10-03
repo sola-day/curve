@@ -8,7 +8,8 @@
             [curve.router :as router]
             [curve.runtime :as rt]
             [curve.session :as session]
-            [curve.ssr :as ssr])
+            [curve.ssr :as ssr]
+            [curve.transport :as transport])
   (:import [java.util Base64]
            [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
@@ -42,16 +43,17 @@
         s (ssr/take-detached! token)]
     (session/attach! s #(.put inbox %))
     (rt/resume! peer App (:peer data))
-    {:root root :peer peer :inbox inbox :session s
-     :send #(session/receive! s (codec/encode up-enc %))
-     :decode #(codec/decode down %)}))
+    (let [tr (transport/restore (:transport data))]
+      {:root root :peer peer :inbox inbox :session s
+       :send #(session/receive! s (transport/data-frame tr (codec/encode up-enc %)))
+       :decode #(some->> (:data (transport/receive tr %)) (codec/decode down))})))
 
 (defn pump! [{:keys [peer inbox send decode] :as c}]
   (loop [n 0]
     (rt/run! peer)
     (when-let [m (rt/take-message! peer)] (send m))
     (when-let [bs (.poll inbox 60 TimeUnit/MILLISECONDS)]
-      (rt/receive! peer (decode bs))
+      (when-let [m (decode bs)] (rt/receive! peer m))
       (when (< n 100) (recur (inc n)))))
   (rt/run! peer)
   c)

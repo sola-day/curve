@@ -5,7 +5,8 @@
             [curve.headless :as h]
             [curve.mount :as mount]
             [curve.runtime :as rt]
-            [curve.session :as session])
+            [curve.session :as session]
+            [curve.transport :as transport])
   (:import [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
 (def !board (atom {:title "board" :votes 0}))
@@ -24,20 +25,21 @@
         peer (apply rt/peer :client (mapcat identity (dissoc hooks :mounter)))
         inbox (LinkedBlockingQueue.)
         s (session/start! ctor [] {:send! #(.put inbox %)})
-        c {:peer peer :inbox inbox :session s :root root :up (codec/link)}]
+        c {:peer peer :inbox inbox :session s :root root :up (codec/link) :tr (transport/state)}]
     (rt/mount-root! peer ctor)
     c))
 
 (defn pump!
   "Exchange messages until the session has been quiet for a moment."
-  [{:keys [peer inbox session up] :as c} & {:keys [quiet-ms] :or {quiet-ms 50}}]
+  [{:keys [peer inbox session up tr] :as c} & {:keys [quiet-ms] :or {quiet-ms 50}}]
   (do
     (loop [n 0]
       (rt/run! peer)
       (when-let [m (rt/take-message! peer)]
-        (session/receive! session ((:encode up) m)))
+        (session/receive! session (transport/data-frame tr ((:encode up) m))))
       (when-let [bs (.poll inbox quiet-ms TimeUnit/MILLISECONDS)]
-        (rt/receive! peer ((:decode-down c) bs))
+        (when-let [data (:data (transport/receive tr bs))]
+          (rt/receive! peer ((:decode-down c) data)))
         (when (< n 200) (recur (inc n)))))
     (rt/run! peer)
     c))
@@ -72,7 +74,7 @@
   (let [errors (atom [])
         bad (session/start! Board [] {:send! (fn [_]) :on-error #(swap! errors conj %)})
         good (pump! (connect Board))]
-    (session/receive! bad (byte-array [2 1 9 9 99]))
+    (session/receive! bad (byte-array [0 1 0 2 1 9 9 99]))
     (Thread/sleep 100)
     (is (= 1 (count @errors)))
     (is (false? @(:open bad)))

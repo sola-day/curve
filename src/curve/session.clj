@@ -6,7 +6,8 @@
   ever used by one thread at a time. After a batch of tasks the session
   propagates once, encodes once and sends once."
   (:require [curve.codec :as codec]
-            [curve.runtime :as rt])
+            [curve.runtime :as rt]
+            [curve.transport :as transport])
   (:import [java.util.concurrent ConcurrentLinkedQueue Executors ExecutorService ThreadFactory]
            [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
 
@@ -24,7 +25,7 @@
 (defonce metrics
   {:sessions (AtomicLong.) :messages-in (AtomicLong.) :messages-out (AtomicLong.)
    :bytes-in (AtomicLong.) :bytes-out (AtomicLong.) :errors (AtomicLong.)
-   :budget-trips (AtomicLong.) :degraded (AtomicLong.)})
+   :budget-trips (AtomicLong.) :degraded (AtomicLong.) :hibernations (AtomicLong.)})
 
 (defn metric [k] (.get ^AtomicLong (metrics k)))
 
@@ -48,7 +49,7 @@
   (.incrementAndGet ^AtomicLong (metrics :budget-trips))
   (throw (ex-info (str "curve: session budget exceeded: " (name kind)) {:budget kind :detail detail})))
 
-(declare drain!)
+(declare drain! close! hibernated? hibernate!)
 
 (defn- post!
   "Queue f to run on the session's turn."
@@ -86,7 +87,7 @@
         (.addAndGet ^AtomicLong (metrics :bytes-out) n)
         (swap! (:bw s) update :bytes + n)
         (swap! (:stats s) update :bytes-out + n)
-        ((:send! s) bs)))))
+        ((:send! s) (transport/data-frame (:transport s) bs))))))
 
 (defn detach!
   "Keep the session running but hold outgoing messages (between a server
@@ -100,6 +101,35 @@
   (let [{:keys [buffer]} (first (swap-vals! (:sink s) (constantly {:send! send!})))]
     (doseq [bs buffer] (send! bs))
     (post! s (fn []))))
+
+;; ---- reconnection (design §8.3): a dropped connection detaches the session
+;; for a grace period; the client comes back with its token and the last
+;; frame it saw, and both sides resend what the other missed.
+
+(defonce ^:private by-token (atom {}))
+
+(defn connection-lost!
+  "The socket closed. Keep the session for grace-ms, then close it."
+  [s grace-ms]
+  (when @(:open s)
+    (detach! s)
+    (swap! by-token assoc (:token s) s)
+    (.schedule timer ^Runnable (fn [] (when (and (= s (get @by-token (:token s))) (:buffer @(:sink s)))
+                                        (swap! by-token dissoc (:token s))
+                                        (close! s)))
+               (long grace-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))
+
+(defn reconnect!
+  "A client came back: attach its new connection and resend the frames it
+  has not seen. nil when the session is gone (the client starts over)."
+  [token seen send!]
+  (when-let [s (get @by-token token)]
+    (swap! by-token dissoc token)
+    (reset! (:sink s) {:send! send!})
+    (doseq [f (transport/resend (:transport s) seen)] (send! f))
+    (send! (transport/control-frame (:transport s) {:session (:token s) :version (:version s)}))
+    (post! s (fn []))
+    s))
 
 (defn- check-budget! [s turn-ms]
   (let [{:keys [max-nodes max-turn-ms max-strikes]} (:budget s)
@@ -146,7 +176,8 @@
   "Start a session running ctor (with args) as the root.
   opts: :send! (fn [bytes]) required; :executor; :on-error; :on-close;
   :window, unacknowledged messages allowed in flight (default 16)."
-  [ctor args {:keys [send! executor on-error on-close window budget] :or {executor pool window 16}}]
+  [ctor args {:keys [send! executor on-error on-close window budget hibernate-ms]
+              :or {executor pool window 16}}]
   (let [s-ref (volatile! nil)
         sink (atom {:send! send!})
         stats (atom {:nodes 0 :bytes-out 0 :turns 0 :strikes 0})
@@ -170,18 +201,72 @@
            :root (volatile! nil) :open (atom true)
            :stats stats :budget (merge default-budget budget)
            :bw (atom {:start (System/currentTimeMillis) :bytes 0 :over-since nil})
-           :timer timer}]
+           :timer timer
+           :transport (transport/state)
+           :token (str (java.util.UUID/randomUUID))
+           :version (rt/tree-version ctor)
+           :ctor ctor :args args
+           :hibernated (atom nil)
+           :last-activity (atom (System/currentTimeMillis))}]
     (vreset! s-ref s)
     (.incrementAndGet ^AtomicLong (metrics :sessions))
+    ((:send! s) (transport/control-frame (:transport s) {:session (:token s) :version (:version s)}))
+    (when hibernate-ms
+      (let [check (fn check []
+                    (when @(:open s)
+                      (when (and (not (hibernated? s))
+                                 (> (- (System/currentTimeMillis) @(:last-activity s)) hibernate-ms))
+                        (post! s #(hibernate! s)))
+                      (.schedule timer ^Runnable check (long (max 50 (quot hibernate-ms 2)))
+                                 java.util.concurrent.TimeUnit/MILLISECONDS)))]
+        (check)))
     (post! s (fn [] (vreset! (:root s) (apply rt/mount-root! peer ctor args))))
     s))
 
+(declare wake!)
+
 (defn receive!
-  "Bytes arrived from this session's client."
-  [s bs]
+  "A frame arrived from this session's client."
+  [s frame]
   (.incrementAndGet ^AtomicLong (metrics :messages-in))
-  (.addAndGet ^AtomicLong (metrics :bytes-in) (codec/byte-count bs))
-  (post! s (fn [] (rt/receive! (:peer s) ((:decode s) bs)))))
+  (.addAndGet ^AtomicLong (metrics :bytes-in) (codec/byte-count frame))
+  (post! s (fn []
+             (reset! (:last-activity s) (System/currentTimeMillis))
+             (wake! s)
+             (let [{:keys [data]} (transport/receive (:transport s) frame)]
+               (when data (rt/receive! (:peer s) ((:decode s) data)))))))
+
+;; ---- hibernation (design §8.6 item 6)
+
+(defn hibernate!
+  "Snapshot the server peer and unmount it (watches, shared values and
+  frames released) without telling the client. Called on the session's turn."
+  [s]
+  (let [peer (:peer s)]
+    (when-let [root @(:root s)]
+      (when-not (rt/has-pending-output? peer)
+        (reset! (:hibernated s) (rt/resume-snapshot peer))
+        (rt/unmount-silently! peer root)
+        (vreset! (:root s) nil)
+        (.incrementAndGet ^AtomicLong (metrics :hibernations))))))
+
+(defn wake!
+  "Restore a hibernated session from its snapshot (on its turn)."
+  [s]
+  (when-let [snap @(:hibernated s)]
+    (reset! (:hibernated s) nil)
+    (vreset! (:root s) (apply rt/resume! (:peer s) (:ctor s) snap (:args s)))
+    ;; rebuild closures and subscriptions before handling what woke us
+    (rt/run! (:peer s))))
+
+(defn hibernated? [s] (some? @(:hibernated s)))
+
+(defn migrate!
+  "This node is draining: ask the client to reconnect (to another node),
+  keeping its local state, then close."
+  [s]
+  ((:send! s) (transport/control-frame (:transport s) {:drain true}))
+  (.schedule timer ^Runnable (fn [] (close! s)) 1000 java.util.concurrent.TimeUnit/MILLISECONDS))
 
 (defn call
   "Run f on the session's turn and wait for its result (tests, tooling)."
