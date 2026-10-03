@@ -116,7 +116,7 @@
      curve.core/mutation curve.core/effect curve.core/suspense curve.core/boundary
      curve.core/binding curve.core/shared curve.core/offload curve.core/flow
      curve.core/-with-env curve.core/route curve.core/defer curve.core/declassify curve.core/foreign
-     curve.core/static})
+     curve.core/static curve.core/projection})
 
 (defn- head-name [env h]
   (when (and (symbol? h) (not (local-name? env h)) (not (special-forms h)))
@@ -359,9 +359,16 @@
       [:div.curve-foreign {:curve/foreign [mf props]}])
 
     curve.core/mutation
-    (let [[f] args]
+    (let [[f opts] args]
       `(let [g# (curve.core/server ~f)]
-         (fn [& args#] (curve.core/-mutate g# args#))))))
+         (fn [& args#] (curve.core/-mutate g# args# ~opts))))
+
+    curve.core/projection
+    (let [[x] args]
+      `(let [v# ~x
+             !p# (curve.core/client (curve.optimistic/projection))]
+         (curve.core/client (curve.core/effect (curve.optimistic/rebase! !p# v#)))
+         !p#))))
 
 (defn- compile-seq [env form]
   (let [[h & args] form]
@@ -396,7 +403,7 @@
             (add-node! (:b env) {:op :watch :site (:site env) :in [rid]}))
           (contains? '#{curve.core/boundary curve.core/suspense curve.core/flow
                         curve.core/offload curve.core/mutation curve.core/route curve.core/defer
-                        curve.core/foreign} q)
+                        curve.core/foreign curve.core/projection} q)
           (compile-form env (rewrite q form))
           (= q 'curve.core/static)
           ;; evaluated once, at build time, on the JVM; the result is a constant
@@ -695,8 +702,15 @@
 
 (defn- emit-code? [target site]
   ;; the JVM build carries client code too (tests, SSR); the browser build
-  ;; never carries server code
-  (or (= target :clj) (not= site :server)))
+  ;; carries server code only when it runs a local server site in a worker
+  (or (= target :clj) (= target :cljs-local) (not= site :server)))
+
+(defn- local-server-build?
+  "Does this cljs build run server sites locally (curve.local, a worker)?
+  Set :compiler-options {:curve/local-server true} in the shadow build."
+  []
+  (boolean (some-> (requiring-resolve 'cljs.env/*compiler*) deref deref
+                   (get-in [:options :curve/local-server]))))
 
 (defn- emit-node [target nd]
   (let [base (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq :state])]
@@ -761,7 +775,7 @@
                 :arg-ids @(:arg-ids b)
                 :nodes (mapv #(emit-node target %) nodes)
                 :render (merge {:holes (list 'quote (:holes render))}
-                               (if (= target :cljs)
+                               (if (contains? #{:cljs :cljs-local} target)
                                  {:html (apply str (map tree->html (:tree render)))}
                                  {:tree (list 'quote (:tree render))}))}
                (when site {:site site})
@@ -851,7 +865,7 @@
   unchanged definition (same source, same set of known reactive fns) reuses
   its previous output."
   [menv qname params body opts]
-  (let [k [qname (cljs? menv) (pr-str params body) (dissoc opts :menv) (hash @registry)]]
+  (let [k [qname (cljs? menv) (and (cljs? menv) (local-server-build?)) (pr-str params body) (dissoc opts :menv) (hash @registry)]]
     (or (get @cache k)
         (let [code (compile-defn* menv qname params body opts)]
           (swap! cache assoc k code)
@@ -861,7 +875,7 @@
 
 (defn compile-defn* [menv qname params body opts]
   (let [b (new-builder)
-        target (if (cljs? menv) :cljs :clj)
+        target (if (cljs? menv) (if (local-server-build?) :cljs-local :cljs) :clj)
         site (or (:site opts) :inherit)
         [syms body] (param-binding params body)
         env {:b b :locals {} :outer nil :site site :menv menv :name (symbol (name qname))

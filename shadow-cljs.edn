@@ -10,4 +10,11 @@
   :sqlite {:target :browser
            :output-dir "examples/sqlite-table/resources/public/js"
            :asset-path "/js"
-           :modules {:main {:init-fn sqlite-table.client/init}}}}}
+           :modules {:main {:init-fn sqlite-table.client/init}}}
+  :local {:target :browser
+          :output-dir "examples/local/resources/public/js"
+          :asset-path "/js"
+          :compiler-options {:curve/local-server true}
+          :modules {:shared {:entries [local.app]}
+                    :main {:init-fn local.main/init :depends-on #{:shared}}
+                    :worker {:init-fn local.worker/init :depends-on #{:shared} :web-worker true}}}}}

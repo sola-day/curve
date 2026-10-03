@@ -70,8 +70,10 @@
   "Mount ctor into container and connect. Returns a handle atom.
   opts: :url; :container; :router? (true); :resume? (true: continue a server
   render left in the page); :connect :eager (default) or :lazy (open the
-  websocket when the client first has something to send)."
-  [ctor & {:keys [url container router? seed resume? connect] :or {router? true resume? true}}]
+  websocket when the client first has something to send); :socket, a fn
+  returning a WebSocket-shaped connection (curve.local/socket for a server
+  site running in a Web Worker)."
+  [ctor & {:keys [url container router? seed resume? connect socket] :or {router? true resume? true}}]
   (when router? (router/install!))
   (let [container (or container (.getElementById js/document "app") (.-body js/document))
         resume (when resume? (resume-data))
@@ -103,7 +105,8 @@
                            snap (when root (rt/snapshot root))]
                        (when root (rt/unmount-frame! root))
                        (set! (.-innerHTML container) "")
-                       (start! ctor :url url :container container :router? false :resume? false :seed snap))))
+                       (start! ctor :url url :container container :router? false :resume? false :seed snap
+                               :socket socket))))
         on-control (fn [{:keys [session version drain]}]
                      (cond
                        drain (restart!)
@@ -126,7 +129,7 @@
                          (rt/receive! @peer-ref (codec/decode down data))
                          (@schedule-ref))))
         open! (fn open! [params]
-                (let [w (js/WebSocket. (str (or url (default-url)) params))]
+                (let [w (if socket (socket params) (js/WebSocket. (str (or url (default-url)) params)))]
                   (set! (.-binaryType w) "arraybuffer")
                   (set! (.-onmessage w) on-message)
                   (set! (.-onopen w)

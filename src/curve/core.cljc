@@ -1,7 +1,8 @@
 (ns curve.core
   "User-facing API: r/defn and the reactive forms."
   (:refer-clojure :exclude [defn for binding])
-  (:require [curve.router]
+  (:require [curve.optimistic]
+            [curve.router]
             [curve.runtime :as rt]
             #?(:clj [curve.compiler :as c]))
   #?(:cljs (:require-macros [curve.core])))
@@ -42,6 +43,11 @@
      (defmacro boundary "(r/boundary (fn [err retry] fallback) body) show fallback when body fails." [& body] (only-in-reactive &form))
      (defmacro suspense "(r/suspense fallback body) show fallback while body has pending values." [& body] (only-in-reactive &form))
      (defmacro -with-env [& body] (only-in-reactive &form))
+     (defmacro projection
+       "(r/projection server-value) a client projection of a server value for
+       optimistic updates; read it with r/watch, target it with
+       (r/mutation f {:optimistic [projection transform]})."
+       [& body] (only-in-reactive &form))
      (defmacro static
        "(r/static expr) evaluate expr once at build time on the JVM (read a
        file, render Markdown); the value is a constant in both builds."
@@ -88,12 +94,24 @@
      :clj (boolean (or (:checked e) (some-> (:target e) :props deref (get "checked"))))))
 
 (clojure.core/defn -mutate
-  "Call server fn g; a single DOM event argument is replaced by its value."
-  [g args]
-  (let [[a & more] args
-        event? #?(:cljs (and (some? a) (instance? js/Event a))
-                  :clj (and (map? a) (contains? a :target)))]
-    (apply g (if (and event? (empty? more)) [(event-value a)] args))))
+  "Call server fn g; a single DOM event argument is replaced by its value.
+  opts {:optimistic [projection f]} applies f to the projection until the
+  server answers (then the server's value takes over, or it rolls back)."
+  ([g args] (-mutate g args nil))
+  ([g args {:keys [optimistic]}]
+   (let [[a & more] args
+         event? #?(:cljs (and (some? a) (instance? js/Event a))
+                   :clj (and (map? a) (contains? a :target)))
+         args (if (and event? (empty? more)) [(event-value a)] args)
+         [p f] optimistic
+         id (when p (curve.optimistic/push! p f))
+         result (apply g args)]
+     (when id
+       (let [done (fn [] (curve.optimistic/drop! p id))]
+         (if (rt/pending? @result)
+           (add-watch result ::optimistic (fn [_ r _ v] (when-not (rt/pending? v) (remove-watch r ::optimistic) (done))))
+           (done))))
+     result)))
 
 (def pending rt/pending)
 (def pending? rt/pending?)

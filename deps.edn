@@ -18,6 +18,7 @@
           :extra-deps {ring/ring-jetty-adapter {:mvn/version "1.15.3"}}
           :jvm-opts ["-Xmx4g" "-Dclojure.compiler.direct-linking=true"]}
   :hello {:extra-paths ["examples/hello/src" "examples/hello/resources"]}
+  :local {:extra-paths ["examples/local/src" "examples/local/resources"]}
   :todomvc {:extra-paths ["examples/todomvc/src" "examples/todomvc/resources"]}
   :sqlite {:extra-paths ["examples/sqlite-table/src" "examples/sqlite-table/resources"]
            :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.46.1.3"}}}}}

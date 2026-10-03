@@ -59,6 +59,14 @@
         (recur (inc n)))))
   p)
 
+(defn run-client!
+  "Run only the client side (no messages exchanged): what the user sees
+  before the server has answered."
+  [p]
+  (drain-posted! (get-in p [:posted :client]))
+  (rt/run! (:client p))
+  p)
+
 (defn wire-log [p] @(:wire p))
 (defn clear-wire! [p] (reset! (:wire p) []) p)
 

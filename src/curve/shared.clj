@@ -102,3 +102,14 @@
   "Block until the shared runner has processed everything queued so far."
   []
   @(.submit runner ^Callable (fn [] true)))
+
+;; ---------------------------------------------------------------- shared atoms
+
+(defonce ^:private atoms (atom {}))
+
+(defn shared-atom
+  "The process-wide atom for key, created with init the first time.
+  Collaborative state: every session that watches it sees every change."
+  [key init]
+  (or (get @atoms key)
+      (get (swap! atoms (fn [m] (if (contains? m key) m (assoc m key (clojure.core/atom init))))) key)))
