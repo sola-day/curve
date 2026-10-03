@@ -2,6 +2,7 @@
   "Data sources (design §8.5). A source turns a query into a live reference:
   watchable, and subscribed to its source only while something watches it,
   so r/watch inside r/shared gives one subscription per distinct query."
+  (:require [clojure.string])
   (:import [java.util.concurrent Executors ScheduledExecutorService TimeUnit ThreadFactory]))
 
 (defprotocol Source
@@ -115,3 +116,37 @@
   (let [r (query (:get-conn src) stmt)]
     (swap! (:!version src) inc)
     r))
+
+;; ---------------------------------------------------------------- table events
+
+(defn tables-of
+  "Table names a SQL query reads (from/join), lower case."
+  [sql]
+  (set (map (comp clojure.string/lower-case second)
+            (re-seq #"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_.]*)" sql))))
+
+(defrecord TableSource [query-fn subs]
+  Source
+  (rows [_ q]
+    (let [tables (if (map? q) (set (:tables q)) (tables-of (first q)))
+          q (if (map? q) (:query q) q)]
+      (live-ref #(query-fn q)
+                (fn [refresh]
+                  (let [e {:tables tables :refresh refresh}]
+                    (swap! subs conj e)
+                    #(swap! subs disj e)))))))
+
+(defn table-source
+  "A source refreshed by table-change events from anywhere (CDC, Redis,
+  Kafka, application code): (changed! src #{\"orders\"}) re-runs only the
+  live queries that read those tables. query-fn: (fn [query]) -> rows."
+  [query-fn]
+  (->TableSource query-fn (atom #{})))
+
+(defn changed!
+  "Tables changed: refresh the live queries reading them."
+  [^TableSource src tables]
+  (let [tables (set (map clojure.string/lower-case tables))]
+    (doseq [{t :tables refresh :refresh} @(:subs src)
+            :when (some tables t)]
+      (refresh))))
