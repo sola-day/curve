@@ -349,10 +349,20 @@
 
     curve.core/defer
     (let [[opts & body] (if (map? (first args)) args (cons {} args))]
+     (if (= :visible (:when opts))
+      ;; the placeholder is an element we can watch: mount when it is seen
+      `(let [!ready# (curve.core/client (atom false))
+             ready# (curve.core/watch !ready#)]
+         (if ready#
+           (do ~@body)
+           [:div.curve-defer {:curve/foreign [curve.runtime/visible-mount
+                                              {:margin ~(:margin opts 0)
+                                               :on-visible (fn [] (reset! !ready# true))}]}
+            ~(:placeholder opts)]))
       `(let [!ready# (curve.core/client (atom false))
              ready# (curve.core/watch !ready#)]
          (curve.core/client (curve.core/effect (curve.runtime/defer! ~opts (fn [] (reset! !ready# true)))))
-         (if ready# (do ~@body) ~(:placeholder opts))))
+         (if ready# (do ~@body) ~(:placeholder opts)))))
 
     curve.core/foreign
     (let [[mf props] args]

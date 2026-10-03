@@ -64,7 +64,9 @@
        [x _reason] x)
      (defmacro route "(r/route routes) the current route, matched on the client." [& body] (only-in-reactive &form))
      (defmacro defer
-       "(r/defer {:when :idle|:interaction :placeholder hiccup} body)
+       "(r/defer {:when :idle|:interaction|:visible :placeholder hiccup :margin px} body)
+       :visible mounts body when the placeholder scrolls into view (:margin px
+       earlier); give the placeholder a height.
        mount body later. A deferred subtree is also a natural code-split point."
        [& body] (only-in-reactive &form))
      (defmacro shared

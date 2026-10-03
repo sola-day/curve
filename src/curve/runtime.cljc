@@ -1104,10 +1104,8 @@
                (recur (inc i) (unsigned-bit-shift-right (js/Math.imul (bit-xor h (.charCodeAt s i)) 0x01000193) 0))
                h))))
 
-(defn tree-version
-  "Hash of the structure of every program table reachable from ctor: the
-  JVM and browser builds of the same app agree, and any change that would
-  break the protocol (nodes, edges, sites, holes) changes it."
+(defn tree-structure
+  "What tree-version hashes (for diagnosing version mismatches)."
   [ctor]
   (let [seen (volatile! #{})
         acc (volatile! [])]
@@ -1128,7 +1126,15 @@
            (walk (:ctor nd))
            (when-let [t (:ctor-fn nd)] (walk (t))))))
      ctor)
-    (fnv32 (pr-str (sort-by first @acc)))))
+    (sort-by first @acc)))
+
+(defn tree-version
+  "Hash of the structure of every program table reachable from ctor: the
+  JVM and browser builds of the same app agree, and any change that would
+  break the protocol (nodes, edges, sites, holes) changes it."
+  [ctor]
+  (fnv32 (pr-str (tree-structure ctor))))
+
 
 ;; ---- hot reload
 
@@ -1174,9 +1180,8 @@
 
 (defn defer!
   "Call ready! when :when happens: :idle (default) or :interaction (first
-  pointer or key event). :visible is accepted but currently behaves like
-  :idle (the placeholder element is not yet observed). Immediately on the
-  JVM. Returns a cleanup fn."
+  pointer or key event). (:visible is handled by visible-mount.)
+  Immediately on the JVM. Returns a cleanup fn."
   [{:keys [when] :or {when :idle}} ready!]
   #?(:clj (do (ready!) nil)
      :cljs (case when
@@ -1187,6 +1192,30 @@
              (if (exists? js/requestIdleCallback)
                (let [id (js/requestIdleCallback ready!)] #(js/cancelIdleCallback id))
                (let [id (js/setTimeout ready! 1)] #(js/clearTimeout id))))))
+
+(defonce ^{:doc "(fn [el {:keys [margin on-visible]}]) -> stop fn. Replaceable (tests,
+  custom scroll roots). Browser: IntersectionObserver; JVM: visible at once
+  (server rendering shows the content)."}
+  visible-observer
+  (atom #?(:clj (fn [_ {:keys [on-visible]}] (on-visible) nil)
+           :cljs (fn [el {:keys [on-visible margin]}]
+                   (if (exists? js/IntersectionObserver)
+                     (let [o (js/IntersectionObserver.
+                               (fn [entries obs]
+                                 (when (some #(.-isIntersecting %) (array-seq entries))
+                                   (.disconnect obs)
+                                   (on-visible)))
+                               #js {:rootMargin (str (or margin 0) "px")})]
+                       (.observe o el)
+                       #(.disconnect o))
+                     (do (on-visible) nil))))))
+
+(defn visible-mount
+  "r/foreign mount fn for (r/defer {:when :visible} ...): watch the
+  placeholder element; stop watching when it goes away."
+  [el props]
+  (let [stop (@visible-observer el props)]
+    {:unmount (fn [] (when stop (stop)))}))
 
 (defn offload!
   "Run thunk off the calling thread (a virtual thread on the JVM) and emit

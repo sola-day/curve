@@ -17,4 +17,8 @@
           :compiler-options {:curve/local-server true}
           :modules {:shared {:entries [local.app]}
                     :main {:init-fn local.main/init :depends-on #{:shared}}
-                    :worker {:init-fn local.worker/init :depends-on #{:shared} :web-worker true}}}}}
+                    :worker {:init-fn local.worker/init :depends-on #{:shared} :web-worker true}}}
+  :showcase {:target :browser
+             :output-dir "examples/showcase/resources/public/js"
+             :asset-path "/js"
+             :modules {:main {:init-fn showcase.client/init}}}}}

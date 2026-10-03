@@ -122,6 +122,8 @@ M1–M2 不依赖浏览器，可以完全在 JVM 上测；M3 依赖 cljs.analyze
 
 阶段 3（生态）按计划为"按需排期"，未纳入本轮；其中部署指南已写（docs/deploy.md）。
 
+后续补充（2026-10-03）：`r/defer {:when :visible}` 已实现（占位元素上的 IntersectionObserver，`:margin` 提前量）；虚拟滚动支持可变行高（渲染后测量，Fenwick 树存高度，按偏移找行 O(log n)，滚动锚定）。examples/showcase 在真实浏览器中验证两者。
+
 ## 实现与设计的出入
 
 | 设计 | 实现 | 原因 |
@@ -130,6 +132,5 @@ M1–M2 不依赖浏览器，可以完全在 JVM 上测；M3 依赖 cljs.analyze
 | §7.3 hydration 认领已有 DOM | 用快照在同一个 JS 任务内重新渲染并替换 SSR DOM | 不闪烁、不重查、实现小；代价是 JS 加载前已获得焦点的输入会失焦 |
 | §4.6 可选 SCI 模块 | 白名单解释器（无 eval），`:eval` 选项可接入 SCI，未打包 SCI | 默认安全、零体积 |
 | §8.5 Datomic / Postgres 适配器 | 已实现；Datomic 用替身 API 测试，Postgres 只测了 wal2json 解析 | 本机无这两个数据库 |
-| r/defer `:visible` | 暂按 `:idle` 处理 | 尚未观察占位元素 |
 | 版本协商 | 版本是程序表结构（节点、站点、读者、洞）的 FNV-1a 哈希 | 平台条件代码（`#?`）会让源码文本在两端不同，但协议相同 |
 

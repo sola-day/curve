@@ -47,7 +47,8 @@ clojure -M:bench -m curve.bench         # phase-0 benchmarks
 ```
 
 Examples: `examples/hello`, `examples/todomvc`, `examples/sqlite-table`,
-`examples/local` (server site in a Web Worker).
+`examples/local` (server site in a Web Worker), `examples/showcase`
+(variable-height virtual list of 100k rows, deferred-until-visible section).
 
 Clean-room implementation, MIT licensed. Contributors must not copy or adapt
 code from Electric Clojure (BSL); see design §0.1.
