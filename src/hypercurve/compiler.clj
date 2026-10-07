@@ -296,13 +296,14 @@
 
 (defn- compile-for [env [_ bindings & body :as form]]
   (let [[pat coll & opts] bindings
-        {kf :by recycle :recycle} (apply hash-map opts)
+        {kf :by recycle :recycle keyed :keyed} (apply hash-map opts)
         cid (compile-form (value-env env) coll)
         [[p] body] (param-binding [pat] body)
         {:keys [ctor captures]} (compile-child env [p] body)]
     (add-node! (:b env) (cond-> {:op :for :in [cid] :key (or kf `identity) :ctx-site (:site env)
                                  :ctor ctor :args captures}
-                          recycle (assoc :recycle true)))))
+                          recycle (assoc :recycle true)
+                          keyed (assoc :keyed true)))))
 
 (defn- compile-with-bind
   "Compile body as an inline child whose env gains {key node-id} entries."
@@ -745,7 +746,8 @@
                 (:bind nd) (assoc :bind (list 'quote (:bind nd))))
       :dyn (assoc base :var (list 'quote (:var nd)) :default (:default nd))
       :for (cond-> (assoc base :key (:key nd) :ctor (emit-ctor target (:ctor nd)) :args (:args nd))
-             (:recycle nd) (assoc :recycle true))
+             (:recycle nd) (assoc :recycle true)
+             (:keyed nd) (assoc :keyed true))
       :mount (cond-> base (:ctor-sym nd) (assoc :ctor-fn `(fn [] ~(:ctor-sym nd))))
       (merge base (dissoc nd :b)))))
 

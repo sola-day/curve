@@ -100,7 +100,7 @@ hypercanvas（多人实时画布）是 Hypercurve 的第一个真实应用。对
 | M28 共享原子走共享发送路径 | `r/watch` 一个共享原子时，像 `r/shared` 一样用"版本游标 + 编码一次"的 blob 下发：一次变更只做一次 diff（复用写入时已算好的 delta），N 个会话共享同一份字节 | 1 次写入 × 100 会话 = 1 次编码；线路字节只含变化字段 |
 | M29 频率控制 | ① 发送提示 `^{:debounce ms}`（安静 ms 后才发，与 `^{:rate}` 节流并列）；② `hypercurve.timing`：`debounce`、`throttle`（leading/trailing、`flush!`、`cancel!`，走 Clock，虚拟时钟可测）；③ `r/mutation` 选项 `{:debounce ms}`（合并为最后一次调用，乐观投影立即生效）；④ `presence/update!` 支持 `{:rate hz}` 合并 | 虚拟时钟下的确定性测试：N 次输入 → 1 次发送/调用 |
 | M30 二维视口窗口 | `hypercurve.virtual`：`quantize`（视口量化到格子，平移不越格不重算）、`in-rect`（按包围盒过滤）、`grid-index`（均匀网格空间索引，按 delta 增量维护，查询 O(格子数)） | 1 万元素平移只增删边缘元素；量化后小幅平移零重算 |
-| M31 delta 感知的 `r/for` | 客户端收到 map 的 `[:m {:patch ...}]` 时，把被触及的 key 传给下游 `r/for`，只调和这些子项，不再 O(n) 遍历；`r/for` 直接接受 map（按 key 迭代） | 1000 个元素中改 1 个：调和工作量 O(1)（计数断言） |
+| M31 delta 感知的 `r/for` | 客户端收到 map 的 `[:m {:patch ...}]` 时，把被触及的 key 传给下游 `r/for`，只调和这些子项，不再 O(n) 遍历；`r/for ... :keyed true` 直接接受 map（按 key 迭代） | 1000 个元素中改 1 个：调和工作量 O(1)（计数断言） |
 | M32 版本历史模块 | `hypercurve.history`：基于 M27 变更流，按"同一用户 + 时间窗口 + 字段冲突即封存"合并相邻变更为版本（字段只存首个 before 与最新 after，抵消净零变更）；快照 + 重放计算任意版本；`restore!` 作为一条新变更写回 | 合并、抵消、并发封存、恢复后再恢复的性质测试 |
 | M33 协作撤销模块 | `hypercurve.undo`：每用户的撤销栈，只记录自己的字段变更；撤销时若该字段已被他人改过则跳过；500 ms 内同对象合并 | 两用户交错编辑的撤销语义测试 |
 | M34 客户端缓存续传 | 客户端保留最近 N 个共享值及其版本；重新观察时把版本带给服务端，服务端从该版本发 delta（日志中已无则发全量） | 返回已看过的画布只传增量 |
@@ -142,6 +142,10 @@ hypercanvas（多人实时画布）是 Hypercurve 的第一个真实应用。对
 | M28 | 完成 | 2026-10-07 | `rt/Shareable` 协议：`r/watch` 共享原子走版本游标 + 一次编码；相邻版本直接复用写入时的 delta；`shared-atom` 也改为 SharedAtom |
 | M29 | 完成 | 2026-10-07 | `hypercurve.timing`（debounce / throttle，`:max-wait` `:leading` `:trailing`，`flush!` `cancel!`）；发送提示 `^{:debounce ms}`；`r/mutation {:debounce ms}`；`presence/publisher`（合并 + 限频）、`join!` 可指定 id；JVM 主机时钟改为单个调度线程 |
 | M30 | 完成 | 2026-10-07 | `virtual/quantize` `in-rect` `grid-index` `index-sync` `index-patch` |
+| M31 | 完成 | 2026-10-07 | `r/for [x m :keyed true]`：按 map 的键迭代；值经线路或共享原子以 delta 到达时只访问被触及的条目（客户端与服务端两侧），1000 项改 1 项访问 1 次；`rt/counters` 计数 |
+| M32 | 完成 | 2026-10-07 | `hypercurve.history`：`recorder` 把变更折叠为按用户的版本（字段首个 before + 最新 after，净零抵消），空闲 / 字段冲突 / 恢复时封存；`replay`、`apply-version`、`restore!` |
+| M33 | 完成 | 2026-10-07 | `hypercurve.undo`：每用户每键的撤销/重做栈，500 ms 内同实体合并；只回退仍是自己所留值的路径，他人改过的跳过 |
+| M34 | 完成 | 2026-10-07 | 客户端缓存槽：服务端精确镜像客户端缓存（分配、LRU 淘汰、版本），重新观察时只发 `[:cache 槽 delta]`，无变化只发槽号；客户端缺槽时 `:resync` 取全量。顺带修正：共享值切换实例时重置游标 |
 
 阶段 3（生态）按计划为"按需排期"，未纳入本轮；其中部署指南已写（docs/deploy.md）。
 

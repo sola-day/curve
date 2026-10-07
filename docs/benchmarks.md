@@ -26,6 +26,7 @@ site), dependents as int arrays and a per-frame queued flag brought it down.
 | 2026-10-03 | M8 | examples/todomvc | — | 53.1 KB |
 | 2026-10-03 | M8 | examples/sqlite-table | — | 52.6 KB |
 | 2026-10-03 | M25 | examples/hello (with SSR resume, reliable transport, router) | — | 64.1 KB |
+| 2026-10-07 | M34 | examples/hello (with keyed loops, client cache slots, debounce) | — | 67.9 KB |
 
 Each bundle includes cljs.core; no server code appears in any of them.
 

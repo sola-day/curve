@@ -15,6 +15,9 @@
     {:op :mount :ctor c :in [ids]}               reactive function call
     {:op :mount :in [ctor-id & ids]}             dynamic (higher-order) call
     {:op :for :in [coll] :key f :ctor c :args [ids]}  keyed child per item
+      :keyed true: coll is a map {k item}; one child per entry, keyed by k.
+      When the map arrived as a delta (wire or shared atom), only the
+      entries the delta touches are reconciled.
     {:op :effect :site s :f host-fn :in [ids]}   (f args) -> cleanup fn
   Every node also carries :readers, the set of sites whose nodes read it;
   that is what decides which cells cross the wire.
@@ -40,7 +43,8 @@
   way r/shared cells are: a version cursor and a delta encoded once."
   (-share! [r on-change]
     "Follow r; on-change is called after every change. Returns
-    {:current (fn [] [value version]) :blob (fn [from to] bytes) :release (fn [])}."))
+    {:current (fn [] [value version]) :blob (fn [from to] bytes) :release (fn [])
+     :delta (fn [from to] delta-or-nil)}  ; optional, lets keyed loops skip a diff"))
 
 (defrecord Failure [error])
 (defn failure? [x] (instance? Failure x))
@@ -227,7 +231,7 @@
 
 ;; ---------------------------------------------------------------- mounting
 
-(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of revive resume-wire!)
+(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of revive resume-wire! note-delta! slot-unbind!)
 
 (def ^:private no-holes (object-array 0))
 
@@ -518,6 +522,61 @@
             (do (vswap! (:children f) assoc i c) (child-ret-value c))
             (do (vswap! (:children f) dissoc i) pending))))))
 
+(defn- count! [peer k n]
+  (vswap! (:counters peer) update k (fnil + 0) n))
+
+(defn counters
+  "Work counters of a peer (tests and benchmarks): {:for-visits n ...}."
+  [peer] @(:counters peer))
+
+(defn- coll-delta
+  "The delta that turned the previous collection of keyed loop i into coll,
+  when it is known (received or read from a shared atom in this run)."
+  [f i nd coll]
+  (let [j (first (:in nd))
+        [sf si] (or (get @(:arg-srcs f) j) [f j])
+        [prev v d] (get @(:deltas (:peer f)) [(:seq-id sf) si])]
+    (when (and d (identical? v coll) (identical? prev (get @(:order f) [::coll i])))
+      d)))
+
+(defn- keyed-for
+  "r/for ... :keyed true over a map. With a known delta only the touched
+  entries are visited: removed ones unmount, changed ones get their new
+  value, new ones mount at the end."
+  [f i nd coll]
+  (let [coll (if (map? coll) coll (into {} (map (juxt (or (:key nd) :id) identity)) coll))
+        prev-ks (get @(:order f) i)
+        cur (or (children-of f i) {})
+        captures (arg-srcs f (:args nd))
+        mount! (fn [k] (mount-child! f i (:ctor nd) k (into [[:value (get coll k)]] captures)))
+        update! (fn [c k] (set-cell! c (arg-id (:ctor c) 0) (get coll k)))
+        d (when prev-ks (coll-delta f i nd coll))
+        [kids ks]
+        (if d
+          (let [{:keys [set dissoc patch]} (second d)
+                kids (reduce (fn [m k] (if-let [c (get m k)] (do (unmount-frame! c) (clojure.core/dissoc m k)) m))
+                             cur dissoc)
+                ks (if (seq dissoc) (filterv #(not (contains? dissoc %)) prev-ks) prev-ks)
+                touched (concat (keys set) (keys patch))]
+            (count! (:peer f) :for-visits (+ (count dissoc) (count touched)))
+            (reduce (fn [[m ks] k]
+                      (if-let [c (get m k)]
+                        (do (update! c k) [m ks])
+                        [(assoc m k (mount! k)) (conj ks k)]))
+                    [kids ks] touched))
+          (let [ks (vec (keys coll))]
+            (count! (:peer f) :for-visits (+ (count cur) (count ks)))
+            (doseq [[k c] cur] (when-not (contains? coll k) (unmount-frame! c)))
+            [(reduce (fn [m k] (assoc m k (if-let [c (get cur k)] (do (update! c k) c) (mount! k)))) {} ks)
+             ks]))]
+    (vswap! (:children f) assoc i kids)
+    (vswap! (:order f) assoc i ks [::coll i] coll [::prev i] prev-ks)
+    (when (and (not (identical? ks prev-ks)) (not= ks prev-ks))
+      (when-let [h (:on-children (:peer f))] (h f i)))
+    (when (link-used? f i)
+      (let [rets (mapv #(child-ret-value (kids %)) ks)]
+        (or (some #(when (or (pending? %) (failure? %)) %) rets) rets)))))
+
 (defn- compute-for [f i nd]
   (let [coll (value f (first (:in nd)))]
     (cond
@@ -535,7 +594,11 @@
             rets (mapv #(child-ret-value (kids %)) (get @(:order f) i))]
         (or (some #(when (or (pending? %) (failure? %)) %) rets) rets))
 
+      (:keyed nd)
+      (keyed-for f i nd coll)
+
       :else
+      (do (count! (:peer f) :for-visits (count coll))
       (let [kf (or (:key nd) identity)
             items (vec coll)
             prev-ks (get @(:order f) i)
@@ -564,7 +627,7 @@
             (when-let [h (:on-children (:peer f))] (h f i)))
           (when (link-used? f i)
             (let [rets (mapv #(child-ret-value (kids %)) ks)]
-              (or (some #(when (or (pending? %) (failure? %)) %) rets) rets))))))))
+              (or (some #(when (or (pending? %) (failure? %)) %) rets) rets)))))))))
 
 (defn- follow-shareable
   "Server: r/watch on a Shareable. Holds one handle per cell (released when
@@ -576,12 +639,27 @@
   (let [cur (get @(:shared f) i)]
     (when (and cur (not (identical? r (:ident cur))))
       ((:release cur))
-      (vswap! (:shared f) dissoc i))
+      (vswap! (:shared f) dissoc i)
+      ;; versions belong to an instance: start the new one from scratch
+      (aset ^objects (:sent f) i nil))
     (when-not (get @(:shared f) i)
       (let [peer (:peer f)
-            h (-share! r (fn [] ((:post! peer) #(mark-dirty! f i))))]
-        (vswap! (:shared f) assoc i (assoc h :ident r))))
-    (let [[v version] ((:current (get @(:shared f) i)))]
+            h (-share! r (fn [] ((:post! peer) #(mark-dirty! f i))))
+            release (:release h)
+            k [(:seq-id f) i]]
+        (vswap! (:shared f) assoc i
+                (assoc h :ident r
+                         :release (fn []
+                                    (when-let [slot (get-in @(:shared f) [i :slot])]
+                                      (slot-unbind! peer slot k))
+                                    (release))))))
+    (let [h (get @(:shared f) i)
+          from (:version h)
+          prev (value f i)
+          [v version] ((:current h))]
+      (when (and from (:delta h) (= version (inc from)))
+        (when-let [d ((:delta h) from version)]
+          (note-delta! (:peer f) f i prev v d)))
       (vswap! (:shared f) assoc-in [i :version] version)
       v)))
 
@@ -635,7 +713,8 @@
             cur (get @(:shared f) i)]
         (when (and cur (not= ident (:ident cur)))
           ((:release cur))
-          (vswap! (:shared f) dissoc i))
+          (vswap! (:shared f) dissoc i)
+          (aset ^objects (:sent f) i nil))
         (when-not (get @(:shared f) i)
           (let [peer (:peer f)
                 h ((:shared-acquire peer) (:ctor nd) ident (vec caps)
@@ -749,7 +828,8 @@
     (when-let [[k f] (first @(:queue peer))]
       (vswap! (:queue peer) dissoc k)
       (process-frame! f)
-      (recur))))
+      (recur)))
+  (when (seq @(:deltas peer)) (vreset! (:deltas peer) {})))
 
 ;; ---------------------------------------------------------------- wire state
 ;; Each peer numbers its own frames for the wire (root = 0) and declares a
@@ -789,19 +869,90 @@
     (or (pending? prev) (failure? prev) (fn? prev) (= prev ::unsent)) [:v v]
     :else (delta/diff prev v)))
 
+;; ---- client cache slots (milestone M34)
+;; The client keeps the last value of up to :cache-slots shared atoms it no
+;; longer watches (plus those it does), in numbered slots. The server mirrors
+;; that cache exactly: it decides every slot assignment and eviction and
+;; tracks the version each slot holds, from what it sent (the wire is ordered
+;; and reliable, so the mirror cannot drift). Watching an atom again then
+;; costs a delta from the cached version, or nothing at all.
+
+(defn- slot-bind!
+  "Bind cell k to the slot of epoch (an atom instance); returns [slot
+  cached-version-or-nil]."
+  [peer epoch k]
+  (let [st @(:slots peer)
+        tick (inc (:tick st 0))]
+    (if-let [s (get-in st [:of-epoch epoch])]
+      (do (vreset! (:slots peer)
+                   (-> st (assoc :tick tick)
+                       (update-in [:entries s] #(-> % (update :bound conj k) (assoc :used tick)))))
+          [s (get-in st [:entries s :version])])
+      (let [[s st] (if-let [s (peek (:free st))] [s (update st :free pop)] [(:next st 0) (update st :next (fnil inc 0))])]
+        (vreset! (:slots peer)
+                 (-> st (assoc :tick tick)
+                     (assoc-in [:of-epoch epoch] s)
+                     (assoc-in [:entries s] {:epoch epoch :version nil :bound #{k} :used tick})))
+        [s nil]))))
+
+(defn- slot-sent! [peer s version]
+  (vswap! (:slots peer) (fn [st] (if (get-in st [:entries s]) (assoc-in st [:entries s :version] version) st))))
+
+(defn- slot-evict! [st s]
+  (-> st
+      (update :of-epoch dissoc (get-in st [:entries s :epoch]))
+      (update :entries dissoc s)
+      (update :free (fnil conj []) s)))
+
+(defn- slot-unbind!
+  "Cell k stops following slot s; keep at most :cache-slots unwatched slots,
+  evicting the least recently used."
+  [peer s k]
+  (vswap! (:slots peer)
+          (fn [st]
+            (let [st (update-in st [:entries s :bound] disj k)
+                  idle (sort-by #(get-in st [:entries % :used])
+                                (for [[s e] (:entries st) :when (empty? (:bound e))] s))
+                  over (- (count idle) (:cache-slots peer 8))]
+              (reduce slot-evict! st (take (max 0 over) idle))))))
+
 (defn- send-shared!
   "Shared cells remember only the version last sent (a cursor) and send the
-  pre-encoded delta from that version, which every session shares."
-  [f i {:keys [version blob]}]
+  pre-encoded delta from that version, which every session shares. The
+  first send of a cell following a SharedAtom goes through a cache slot:
+  only the delta from what the client already holds."
+  [f i {:keys [version blob epoch slot]}]
   (let [^objects sent (:sent f)
         s (aget sent i)
+        peer (:peer f)
         cursor (when (and (vector? s) (= ::version (first s))) (second s))]
     (when-not (= cursor version)
-      (when-let [bs (blob cursor version)]
-        ;; out-id may append a frame declaration to the outbox: call it first
-        (let [id (out-id f)]
-          (vswap! (:outbox (:peer f)) update :vals (fnil conj []) [id i [:raw bs]])))
+      (if (and (nil? cursor) epoch (pos? (:cache-slots peer 8)))
+        (let [[slot base] (slot-bind! peer epoch [(:seq-id f) i])
+              ;; nil when the client's copy is current: send nothing but the slot
+              bs (when-not (= base version) (blob base version))
+              id (out-id f)]
+          (vswap! (:shared f) assoc-in [i :slot] slot)
+          (vswap! (:outbox peer) update :vals (fnil conj []) [id i [:cache [slot bs]]])
+          (slot-sent! peer slot version))
+        (do
+          (when-let [bs (blob cursor version)]
+            ;; out-id may append a frame declaration to the outbox: call it first
+            (let [id (out-id f)]
+              (vswap! (:outbox peer) update :vals (fnil conj []) [id i [:raw bs]])))
+          (when slot (slot-sent! peer slot version))))
       (aset sent i [::version version]))))
+
+(defn- resync!
+  "The client could not use a cache slot for (frame id, i): forget the slot
+  and send the full value."
+  [peer [id i]]
+  (when-let [f (get @(:out-frames peer) id)]
+    (when-let [slot (get-in @(:shared f) [i :slot])]
+      (vswap! (:slots peer) slot-evict! slot)
+      (vswap! (:shared f) update i dissoc :slot))
+    (aset ^objects (:sent f) i nil)
+    (queue-send! f i)))
 
 (defn- rate-deferred?
   "A cell with a :rate hint is sent at most rate times a second; a change
@@ -933,6 +1084,14 @@
     (and (= (node-site f nd) (other-site (:site peer)))
          (not (link-op? (:op nd))))))
 
+(defn- note-delta!
+  "Remember how cell (f, i) went from prev to v, for a keyed r/for reading
+  it in this same run. Forgotten when the run ends."
+  [peer f i prev v d]
+  (when (and (= :m (first d)) (map? v))
+    (vswap! (:deltas peer) assoc [(:seq-id f) i] [prev v d]))
+  v)
+
 (defn- apply-val! [peer f i d]
   (when (authorized-val? peer f i)
    (let [validate (when (= :server (:site peer)) (:validate (node-at f i)))]
@@ -945,11 +1104,28 @@
                    (failure (ex-info msg (cond-> {:remote true} at (assoc :at at)))))
               :f (remote-proxy peer f i)
               :v (if (and (map? x) (contains? x ::ctor)) (ctor-by-name (::ctor x)) x)
+              :cache (let [[slot bs] x
+                           d' (if (or (nil? bs) (vector? bs)) bs (codec/decode-delta-blob bs))
+                           base (get @(:slot-vals peer) slot ::none)
+                           k [(:seq-id f) i]]
+                       (vswap! (:cell-slot peer) assoc k slot)
+                       (when-not (contains? @(:slot-cleanups peer) k)
+                         (vswap! (:slot-cleanups peer) conj k)
+                         (on-cleanup! f #(do (vswap! (:cell-slot peer) dissoc k)
+                                             (vswap! (:slot-cleanups peer) disj k))))
+                       (cond
+                         (and d' (= :v (first d'))) (second d')
+                         (= base ::none) (do (vswap! (:outbox peer) update :resync (fnil conj []) [@(:remote-id f) i])
+                                             ::resync)
+                         (nil? d') base
+                         :else (delta/patch base d')))
               :raw (let [d' (codec/decode-delta-blob x)]
-                     (if (= :v (first d')) (second d') (delta/patch prev d')))
-              (delta/patch prev d))]
+                     (if (= :v (first d')) (second d') (note-delta! peer f i prev (delta/patch prev d') d')))
+              (note-delta! peer f i prev (delta/patch prev d) d))]
+      (when-let [slot (and (not= v ::resync) (get @(:cell-slot peer) [(:seq-id f) i]))]
+        (vswap! (:slot-vals peer) assoc slot v))
       ;; boundary schema: the server validates what the client sends
-      (when (or (nil? validate) (pending? v) (validate v))
+      (when (and (not= v ::resync) (or (nil? validate) (pending? v) (validate v)))
         (when-let [t @trace] (vswap! t assoc-in [:causes [(:seq-id f) i]] [:remote (other-site (:site peer))]))
         (set-cell! f i v))))))
 
@@ -974,7 +1150,7 @@
 
 (defn receive!
   "Apply a message from the other peer."
-  [peer {:keys [decl vals drop call ret ack] :as msg}]
+  [peer {:keys [decl vals drop call ret ack resync] :as msg}]
   ;; every message with content is acknowledged (piggybacked on the next one)
   (when (seq (dissoc msg :ack)) (vswap! (:to-ack peer) inc))
   (when ack
@@ -997,6 +1173,7 @@
     (vswap! (:stash peer) dissoc id)
     (vswap! (:decls peer) (fn [m] (into {} (remove (fn [[_ v]] (= v id))) m))))
   (doseq [c call] (invoke-call! peer c))
+  (when (= :server (:site peer)) (doseq [r resync] (resync! peer r)))
   (doseq [[token ok v] ret]
     (when-let [r (get @(:calls peer) token)]
       (vswap! (:calls peer) dissoc token)
@@ -1028,6 +1205,12 @@
                   :last-sent (volatile! {})
                   :rate-wakeups (volatile! #{})
                   :last-change (volatile! {})
+                  :deltas (volatile! {})
+                  :slots (volatile! {})
+                  :slot-vals (volatile! {})
+                  :cell-slot (volatile! {})
+                  :slot-cleanups (volatile! #{})
+                  :counters (volatile! {})
                   :in-frames (volatile! {})
                   :decls (volatile! {})
                   :stash (volatile! {})

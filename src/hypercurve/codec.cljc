@@ -224,6 +224,7 @@
 (def ^:private D-VAL 0) (def ^:private D-MAP 1) (def ^:private D-SEQ 2)
 (def ^:private D-SET 3) (def ^:private D-PENDING 4) (def ^:private D-ERROR 5) (def ^:private D-FN 6)
 (def ^:private D-RAW 7)
+(def ^:private D-CACHE 8)
 
 (declare state decoder-state)
 
@@ -232,6 +233,12 @@
     ;; a pre-encoded, self-contained delta (shared values: encoded once,
     ;; sent to every session as is)
     :raw (do (put! o D-RAW) (uvarint! o (byte-count x)) (put-bytes! o x))
+    ;; [slot blob-or-nil]: a value relative to the receiver's cache slot
+    :cache (let [[slot bs] x]
+             (put! o D-CACHE) (uvarint! o slot)
+             (if bs
+               (do (uvarint! o (inc (byte-count bs))) (put-bytes! o bs))
+               (uvarint! o 0)))
     :v (do (put! o D-VAL) (write-value! st o x))
     :p (put! o D-PENDING)
     :e (do (put! o D-ERROR) (str! o (str x)))
@@ -266,6 +273,13 @@
       D-PENDING [:p]
       D-ERROR [:e (read-str r)]
       D-FN [:f]
+      D-CACHE (let [slot (read-uvarint r)
+                    n (read-uvarint r)]
+                [:cache [slot (when (pos? n)
+                                (let [end (+ @(:pos r) (dec n))
+                                      d (read-delta (decoder-state) r)]
+                                  (when-not (= end @(:pos r)) (throw (ex-info "hypercurve.codec: bad cache delta" {})))
+                                  d))]])
       D-RAW (let [n (read-uvarint r)
                   end (+ @(:pos r) n)
                   d (read-delta (decoder-state) r)]
@@ -321,6 +335,7 @@
     (section 4 call (fn [[token id node args]] (uvarint! o token) (uvarint! o id) (uvarint! o node) (write-value! st o args)))
     (section 5 ret (fn [[token ok v]] (uvarint! o token) (write-value! st o ok) (write-value! st o v)))
     (when-let [n (:ack m)] (put! o 6) (uvarint! o n))
+    (section 7 (:resync m) (fn [[id node]] (uvarint! o id) (uvarint! o node)))
     (out-bytes o)))
 
 (defn decode
@@ -342,8 +357,9 @@
                                   3 #(read-uvarint r)
                                   4 #(vector (read-uvarint r) (read-uvarint r) (read-uvarint r) (read-value st r))
                                   5 #(vector (read-uvarint r) (read-value st r) (read-value st r))
+                                  7 #(vector (read-uvarint r) (read-uvarint r))
                                   (throw (ex-info "hypercurve.codec: bad section" {:tag tag}))))]
-          (recur (assoc m (case tag 1 :decl 2 :vals 3 :drop 4 :call 5 :ret) entries)))))))))
+          (recur (assoc m (case tag 1 :decl 2 :vals 3 :drop 4 :call 5 :ret 7 :resync) entries)))))))))
 
 (defn combine
   "Messages form a monoid under section-wise concatenation (acks add)."

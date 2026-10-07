@@ -210,3 +210,176 @@
       (is (= idx2 idx3) "a known delta gives the same index")
       (is (= (virtual/index-sync (virtual/grid-index 200) identity {} moved) idx2)
           "incremental equals rebuilt"))))
+
+;; ---------------------------------------------------------------- M31 keyed loops
+
+(def board-family (shared/atom-family {:init (fn [_] {}) :idle-ms nil}))
+
+(r/defn Board [id]
+  [:div
+   (r/for [it (r/server (r/watch (board-family id))) :keyed true]
+     [:p {:id (str "i" (:id it))} (:label it)])])
+
+(deftest keyed-loop-visits-only-touched-entries
+  (let [a (board-family ::b)
+        _ (reset! a (into {} (for [i (range 1000)] [i {:id i :label (str "n" i)}])))
+        {:keys [dom client] :as p} (render Board ::b)
+        visits #(:for-visits (rt/counters client) 0)
+        label #(some-> (h/query dom (str "#i" %)) h/text-content)]
+    (is (= 1000 (count (h/query-all dom "p"))))
+    (testing "a field change"
+      (let [v0 (visits)]
+        (ct/clear-wire! p)
+        (swap! a assoc-in [7 :label] "seven")
+        (ct/flush! p)
+        (is (= "seven" (label 7)))
+        (is (= 1 (- (visits) v0)) "one entry visited, not 1000")
+        (is (< (ct/bytes-sent p :s->c) 30) "only the changed field crossed")))
+    (testing "add and remove"
+      (let [v0 (visits)]
+        (swap! a #(-> % (dissoc 3) (assoc 2000 {:id 2000 :label "new"})))
+        (ct/flush! p)
+        (is (nil? (label 3)))
+        (is (= "new" (label 2000)))
+        (is (= 1000 (count (h/query-all dom "p"))))
+        (is (= 2 (- (visits) v0)))))
+    (testing "a full value still reconciles correctly"
+      (reset! a {1 {:id 1 :label "only"}})
+      (ct/flush! p)
+      (is (= ["only"] (mapv h/text-content (h/query-all dom "p")))))))
+
+;; ---------------------------------------------------------------- M32 history
+
+(require '[hypercurve.history :as history] '[hypercurve.undo :as undo])
+
+(defn- history-fixture []
+  (let [clk (clock/virtual-clock)
+        sealed (atom [])
+        rec (history/recorder {:clock clk :window-ms 1000 :on-seal #(swap! sealed conj %)})
+        a ((shared/atom-family {:init (fn [_] {}) :idle-ms nil :on-change #(history/record! rec %)}) ::h)]
+    {:clk clk :sealed sealed :rec rec :a a}))
+
+(deftest history-merges-adjacent-changes
+  (let [{:keys [clk sealed rec a]} (history-fixture)
+        ada {:user :ada} bob {:user :bob}]
+    (shared/swap-meta! a ada assoc 1 {:x 0 :y 0})
+    (dotimes [i 50] (shared/swap-meta! a ada assoc-in [1 :x] i))
+    (shared/swap-meta! a ada assoc 2 {:x 5})
+    (shared/swap-meta! a ada dissoc 2)
+    (is (empty? @sealed) "still open")
+    (clock/advance! clk 1000)
+    (let [[v] @sealed]
+      (is (= 1 (count @sealed)) "idle seals")
+      (is (= {[1] [history/absent {:x 49 :y 0}]} (:changes v))
+          "create + 50 moves = one entry; create + delete = nothing")
+      (is (= 52 (:count v)) "writes that changed nothing are not counted")
+      (is (= 1 (:seq v))))
+    (testing "another user's write to the same field seals the open version"
+      (shared/swap-meta! a ada assoc-in [1 :x] 100)
+      (shared/swap-meta! a bob assoc-in [1 :y] 7)
+      (is (= 1 (count @sealed)) "different fields: both stay open")
+      (shared/swap-meta! a bob assoc-in [1 :x] 200)
+      (is (= 2 (count @sealed)))
+      (is (= {[1 :x] [49 100]} (:changes (last @sealed))))
+      (history/seal-all! rec)
+      (is (= {[1 :y] [0 7] [1 :x] [100 200]} (:changes (last @sealed)))))
+    (testing "net-zero versions are not stored"
+      (shared/swap-meta! a ada assoc-in [1 :y] 99)
+      (shared/swap-meta! a ada assoc-in [1 :y] 7)
+      (history/seal-all! rec)
+      (is (= 3 (count @sealed))))
+    (testing "replay rebuilds every version; restore is a version too"
+      (is (= @a (history/replay {} @sealed)))
+      (let [v1 (history/replay {} (take 1 @sealed))]
+        (is (= {1 {:x 49 :y 0}} v1))
+        (shared/swap-meta! a ada assoc 3 {:x 1})
+        (history/restore! a v1 {:user :ada :target 1})
+        (is (= v1 @a))
+        (let [[edit restore] (take-last 2 @sealed)]
+          (is (= :edit (:kind edit)) "the open version was sealed first")
+          (is (= [:restore 1] [(:kind restore) (:target restore)]))
+          (is (= @a (history/replay {} @sealed)) "replay includes the restore")
+          (is (= {:x 200 :y 7} (get (history/apply-version @a restore :backward) 1))
+              "a restore can be undone like any version"))))))
+
+;; ---------------------------------------------------------------- M33 undo
+
+(deftest undo-reverts-only-own-changes
+  (let [clk (clock/virtual-clock)
+        um (undo/manager {:clock clk})
+        a ((shared/atom-family {:init (fn [_] {}) :idle-ms nil :clock clk :on-change #(undo/record! um %)}) ::u)
+        ada {:user :ada} bob {:user :bob}]
+    (shared/swap-meta! a ada assoc 1 {:x 0 :color "red"})
+    (clock/advance! clk 1000)
+    (dotimes [i 5] (shared/swap-meta! a ada assoc-in [1 :x] (inc i)) (clock/advance! clk 100))
+    (clock/advance! clk 1000)
+    (shared/swap-meta! a bob assoc-in [1 :color] "blue")
+    (testing "a drag undoes in one step and keeps bob's color"
+      (is (= {[1 :x] [5 0]} (undo/undo! um a :ada)))
+      (is (= {1 {:x 0 :color "blue"}} @a)))
+    (testing "redo"
+      (undo/redo! um a :ada)
+      (is (= 5 (get-in @a [1 :x]))))
+    (testing "a field someone else changed since is skipped"
+      (shared/swap-meta! a bob assoc-in [1 :x] 42)
+      (is (nil? (undo/undo! um a :ada))
+          "the move (bob moved it since) and the creation (bob edited it) are both skipped")
+      (is (= {1 {:x 42 :color "blue"}} @a) "nothing of bob's is lost"))
+    (testing "a new change clears redo"
+      (undo/undo! um a :ada)
+      (shared/swap-meta! a ada assoc 9 {:x 1})
+      (is (not (undo/can-redo? um a :ada))))
+    (testing "undoing a creation nobody touched removes it"
+      (is (= {[9] [{:x 1} history/absent]} (undo/undo! um a :ada)))
+      (is (not (contains? @a 9))))))
+
+;; ---------------------------------------------------------------- M34 client cache
+
+(r/defn Nav []
+  (let [!at (atom ::ca) at (r/watch !at)]
+    [:div
+     [:button.a {:on-click (fn [_] (reset! !at ::ca))} "a"]
+     [:button.b {:on-click (fn [_] (reset! !at ::cb))} "b"]
+     (Board at)]))
+
+(deftest client-cache-resumes-with-deltas
+  (reset! (board-family ::ca) (into {} (for [i (range 300)] [i {:id i :label (str "a" i)}])))
+  (reset! (board-family ::cb) (into {} (for [i (range 300)] [i {:id i :label (str "b" i)}])))
+  (let [{:keys [dom client] :as p} (render Nav)
+        go! (fn [b] (h/fire! (h/query dom (str "button." b)) "click" {}) (ct/flush! p))
+        label #(some-> (h/query dom (str "#i" %)) h/text-content)
+        full (do (ct/clear-wire! p) (go! "b") (ct/bytes-sent p :s->c))]
+    (is (= "b7" (label 7)))
+    (is (> full 2000) "first visit: the whole board")
+    (testing "back to a board unchanged since: only the slot number"
+      (ct/clear-wire! p) (go! "a")
+      (is (= "a7" (label 7)))
+      (is (< (ct/bytes-sent p :s->c) 20)))
+    (testing "changed while away: only the delta"
+      (swap! (board-family ::cb) assoc-in [7 :label] "B7")
+      (ct/flush! p)
+      (ct/clear-wire! p) (go! "b")
+      (is (= "B7" (label 7)))
+      (is (= 300 (count (h/query-all dom "p"))))
+      (is (< (ct/bytes-sent p :s->c) 40)))
+    (testing "a client that lost its cache asks for the full value"
+      (vreset! (:slot-vals client) {})
+      (go! "a")
+      (is (= "a7" (label 7)))
+      (is (= 300 (count (h/query-all dom "p")))))))
+
+(r/defn ServerSum [id]
+  (let [n (r/server (reduce + (r/for [it (r/watch (board-family id)) :keyed true] (count (:label it)))))]
+    [:span.sum (str n)]))
+
+(deftest keyed-loop-on-the-server-reads-shared-deltas
+  (let [a (board-family ::s)
+        _ (reset! a (into {} (for [i (range 500)] [i {:id i :label "xx"}])))
+        {:keys [dom server] :as p} (render ServerSum ::s)
+        visits #(:for-visits (rt/counters server) 0)]
+    (is (= "1000" (h/text-content (h/query dom ".sum"))))
+    (let [v0 (visits)]
+      (swap! a assoc-in [3 :label] "xxxx")
+      (ct/flush! p)
+      (is (= "1002" (h/text-content (h/query dom ".sum"))))
+      (is (= 1 (- (visits) v0)) "the server loop used the atom's delta"))))

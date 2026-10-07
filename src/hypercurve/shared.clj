@@ -168,6 +168,8 @@
 (defn- new-shared-atom [key family opts v]
   (SharedAtom. key family opts (clojure.core/atom v)
                (clojure.core/atom {:value v :version 0 :log (sorted-map 0 {:value v})
+                                   ;; names this instance in client caches (versions restart on reload)
+                                   :epoch (str (random-uuid))
                                    :refs 0 :seen #{} :seen-q clojure.lang.PersistentQueue/EMPTY
                                    :listeners {} :pending [] :blobs {}})
                (Object.)))
@@ -247,6 +249,8 @@
       (some-> (:idle-timer @st) (apply []))
       (swap! st #(-> % (update :refs inc) (update :subs (fnil conj #{}) on-change) (dissoc :idle-timer))))
     {:current (fn [] (let [{:keys [value version]} @st] [value version]))
+     :epoch (:epoch @st)
+     :delta (fn [from to] (when (= to (inc from)) (get-in @st [:log to :delta])))
      :blob (fn [from to]
              (locking (.-flush-lock sa)
                (let [{:keys [log blobs]} @st k [from to]]
