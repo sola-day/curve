@@ -109,6 +109,16 @@
 (def ^:private T-INST 12) (def ^:private T-UUID 13)
 (def ^:private T-SHAPE-NEW 14) (def ^:private T-SHAPE-REF 15)
 (def ^:private T-F64 16) (def ^:private T-I32 17) (def ^:private T-LIST 18)
+(def ^:private T-REF 19)
+
+;; Blobs (snapshots, cached values) also share structure: a collection or a
+;; long string written twice (the same object, e.g. one map passed to a
+;; thousand child frames) is written once, then referenced by its index in
+;; the order values were started. Connection messages do not do this.
+(def ^:private min-shared-str 16)
+
+(defn- shared? [x]
+  (or (map? x) (vector? x) (set? x) (seq? x) (and (string? x) (>= (count x) min-shared-str))))
 
 (defn- safe-int? [x]
   #?(:clj (and (integer? x) (instance? Long (try (long x) (catch Exception _ nil))))
@@ -142,7 +152,18 @@
   (when (and (> (count m) 1) (not (record? m)) (every? keyword? (keys m)))
     (vec (sort (keys m)))))
 
+(declare write-value*!)
+
 (defn write-value! [st o x]
+  (if-let [refs (and (:refs st) (shared? x) (:refs st))]
+    (if-let [i #?(:clj (.get ^java.util.IdentityHashMap refs x) :cljs (.get refs x))]
+      (do (put! o T-REF) (uvarint! o i))
+      (do #?(:clj (.put ^java.util.IdentityHashMap refs x (.size ^java.util.IdentityHashMap refs))
+             :cljs (.set refs x (.-size refs)))
+          (write-value*! st o x)))
+    (write-value*! st o x)))
+
+(defn- write-value*! [st o x]
   (cond
     (nil? x) (put! o T-NIL)
     (true? x) (put! o T-TRUE)
@@ -183,9 +204,25 @@
     (uuid? x) (do (put! o T-UUID) (str! o (str x)))
     :else (throw (ex-info (str "hypercurve.codec: cannot send value of type " (type x)) {:value x}))))
 
+(declare read-value*)
+
 (defn read-value [st r]
   (let [t (byte-at (:buf r) @(:pos r))]
     (vswap! (:pos r) inc)
+    (if-let [refs (:refs st)]
+      (cond
+        (= t T-REF) (nth @refs (read-uvarint r))
+        (contains? #{T-VEC T-MAP T-SET T-LIST T-SHAPE-NEW T-SHAPE-REF} t)
+        (let [i (count @refs)]
+          (vswap! refs conj nil)
+          (let [v (read-value* st r t)] (vswap! refs assoc i v) v))
+        :else (let [v (read-value* st r t)]
+                (when (and (string? v) (>= (count v) min-shared-str)) (vswap! refs conj v))
+                v))
+      (read-value* st r t))))
+
+(defn- read-value* [st r t]
+  (do
     (condp = t
       T-NIL nil T-TRUE true T-FALSE false
       T-INT (unzigzag (read-uvarint r))
@@ -226,7 +263,7 @@
 (def ^:private D-RAW 7)
 (def ^:private D-CACHE 8)
 
-(declare state decoder-state)
+(declare state decoder-state blob-decoder-state)
 
 (defn- write-delta! [st o [t x]]
   (case t
@@ -277,12 +314,12 @@
                     n (read-uvarint r)]
                 [:cache [slot (when (pos? n)
                                 (let [end (+ @(:pos r) (dec n))
-                                      d (read-delta (decoder-state) r)]
+                                      d (read-delta (blob-decoder-state) r)]
                                   (when-not (= end @(:pos r)) (throw (ex-info "hypercurve.codec: bad cache delta" {})))
                                   d))]])
       D-RAW (let [n (read-uvarint r)
                   end (+ @(:pos r) n)
-                  d (read-delta (decoder-state) r)]
+                  d (read-delta (blob-decoder-state) r)]
               (when-not (= end @(:pos r)) (throw (ex-info "hypercurve.codec: bad raw delta" {})))
               d)
       D-SET [:t (let [add (read-n r #(read-value st r)) rm (read-n r #(read-value st r))]
@@ -316,13 +353,18 @@
 
 (defn decoder-state [] {:kws (volatile! []) :shapes (volatile! [])})
 
+(defn- blob-state [] (assoc (state) :refs #?(:clj (java.util.IdentityHashMap.) :cljs (js/Map.))))
+(defn- blob-decoder-state [] (assoc (decoder-state) :refs (volatile! [])))
+
 (defn encode-delta-blob
   "Encode a delta with no connection state, for reuse across connections."
   [d]
-  (let [o (new-out)] (write-delta! (state) o d) (out-bytes o)))
+  (let [o (new-out)]
+    (write-delta! (blob-state) o d)
+    (out-bytes o)))
 
 (defn decode-delta-blob [bs]
-  (read-delta (decoder-state) {:buf bs :pos (volatile! 0)}))
+  (read-delta (blob-decoder-state) {:buf bs :pos (volatile! 0)}))
 
 (defn encode
   "Encode a message map to bytes."

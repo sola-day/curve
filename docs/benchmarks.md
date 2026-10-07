@@ -56,6 +56,20 @@ server does not instantiate them (demand-driven, design §8.6 item 8).
 | `r/shared` (one value, per-session cursor, encode once) | ~4 KB |
 | per-session query (fresh rows per session) | ~80 KB |
 
+2026-10-08: what is derived from a program table alone (step plans,
+dependents arrays, `server-free?`) is now kept on the table, once per
+process; before, every session derived it for every component it met. In
+Hypercanvas a canvas session went from 83 KB to 48 KB private.
+
+## Resume snapshots
+
+2026-10-08: blobs (snapshots, cached values) write a repeated collection or
+long string once and refer back to it (the same map passed to a thousand
+child frames was written a thousand times). With viewport culling in the app,
+the Hypercanvas page for a 1000-element canvas went from 5.17 MB to 619 KB.
+The encodability check runs once per shared value, and `tree-version` is
+cached (that page's server time 587 → 208 ms).
+
 ## Scenarios (design §16), M24
 
 | Scenario | Measure | Result |

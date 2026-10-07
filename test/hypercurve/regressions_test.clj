@@ -118,3 +118,37 @@
     (is (= 'cljs.core/array (first fns)))
     (is (seq (rest fns)) "lifted fns go to the code array")
     (is (not (clojure.string/includes? json ":state\",false")) "false flags are left out")))
+
+;; ---- snapshot size: values shared by many frames
+
+(deftest blobs-share-repeated-values
+  (let [codec-enc (requiring-resolve 'hypercurve.codec/encode-delta-blob)
+        codec-dec (requiring-resolve 'hypercurve.codec/decode-delta-blob)
+        big (into {} (map (fn [i] [(str "id" i) {:x i :text (str "a fairly long text " i)}])) (range 100))
+        one (count (codec-enc [:v big]))
+        v {:frames (vec (repeat 1000 {:items big :empty [] :s "the same long string here"}))
+           :other [#{1 2} '(1 2) [] {} "short" (str "the same long " "string here")]}
+        bs (codec-enc [:v v])]
+    (is (< (count bs) (+ one 6000)) "a map shared 1000 times is written once")
+    (is (= [:v v] (codec-dec bs)))
+    (testing "a blob inside a connection message (cached shared values)"
+      (let [encode (requiring-resolve 'hypercurve.codec/encode)
+            decode (requiring-resolve 'hypercurve.codec/decode)
+            state (requiring-resolve 'hypercurve.codec/state)
+            dstate (requiring-resolve 'hypercurve.codec/decoder-state)
+            msg (encode (state) {:vals [[1 2 [:cache [0 bs]]] [1 3 [:raw bs]]]})
+            vals (:vals (decode (dstate) msg))]
+        (is (= [:cache [0 [:v v]]] (nth (first vals) 2)))
+        (is (= [:v v] (nth (second vals) 2)))))))
+
+;; ---- per-session memory: what depends only on a table is computed once
+
+(r/defn Memo [a] [:p (str (inc a))])
+
+(deftest tables-are-derived-once-per-process
+  (let [p1 (rt/peer :server) p2 (rt/peer :server)
+        f1 (rt/mount-root! p1 Memo 1)
+        f2 (rt/mount-root! p2 Memo 2)]
+    (is (identical? (:plan f1) (:plan f2)) "step plans are shared between sessions")
+    (is (identical? (:deps f1) (:deps f2)))
+    (is (= (rt/server-free? p1 Memo :client) (rt/server-free? p2 Memo :client)))))

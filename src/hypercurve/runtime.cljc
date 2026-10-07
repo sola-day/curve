@@ -69,12 +69,31 @@
   (cond (nil? x) nil (instance? Frame x) [x] :else (vals x)))
 
 (defn ctor
-  "Finish a program-table entry: derive same-frame dependents from :in."
+  "Finish a program-table entry: derive same-frame dependents from :in. A
+  table also carries a memo for what is derived from it alone (step plans,
+  dependents arrays, server-free?): computed once per process, not per
+  session, and dropped with the table on hot reload."
   [m]
   (let [nodes (:nodes m)
         deps (reduce (fn [acc [j nd]] (reduce (fn [acc i] (update acc i (fnil conj []) j)) acc (:in nd)))
                      {} (map-indexed vector nodes))]
-    (assoc m :dependents (mapv #(get deps % []) (range (count nodes))))))
+    (assoc m :dependents (mapv #(get deps % []) (range (count nodes)))
+             ::memo #?(:clj (java.util.concurrent.ConcurrentHashMap.) :cljs (js/Map.)))))
+
+(defn- memo
+  "(f) once per ctor and string key k (tables made without ctor: every time)."
+  [ctor k f]
+  (if-let [m (::memo ctor)]
+    #?(:clj (or (.get ^java.util.concurrent.ConcurrentHashMap m k)
+                (let [v (f)] (or (.putIfAbsent ^java.util.concurrent.ConcurrentHashMap m k v) v)))
+       :cljs (let [v (.get m k)]
+               (if (undefined? v) (let [v (f)] (.set m k v) v) v)))
+    (f)))
+
+(defn- memo-get [ctor k]
+  (when-let [m (::memo ctor)]
+    #?(:clj (.get ^java.util.concurrent.ConcurrentHashMap m k)
+       :cljs (let [v (.get m k)] (when-not (undefined? v) v)))))
 
 #?(:cljs
    (defn decode-ctor
@@ -487,18 +506,20 @@
     (when (= :link (aget ^objects (:exported f) i))
       (remote-read! c r))))
 
-(defn server-free?
-  "True when no node of ctor (running at site), nor of any ctor it mounts,
-  is computed on or read by the server."
-  [peer ctor site]
+(defn- server-free-in
+  "server-free? with the results of this walk in local ({[name site] [ctor
+  result]}): a cycle is assumed not server-free while it is being walked."
+  [local ctor site]
   (let [k [(:name ctor) site]
-        memo (:server-free peer)]
-    (if (contains? @memo k)
-      (get @memo k)
+        g (memo-get ctor (str "free:" (name site)))]
+    (cond
+      (some? g) g
+      (contains? @local k) (second (get @local k))
+      :else
       (do
-        (vswap! memo assoc k false) ; recursion: assume the worst
+        (vswap! local assoc k [ctor false]) ; recursion: assume the worst
         (let [rs (fn [s] (if (= s :inherit) site s))
-              sub (fn [nd c] (or (nil? c) (server-free? peer c (or (rs (:ctx-site nd)) site))))
+              sub (fn [nd c] (or (nil? c) (server-free-in local c (or (rs (:ctx-site nd)) site))))
               ;; readers are not checked: in a ctor with no server node, a
               ;; :server reader can only be a branch, loop or mount mirroring
               ;; its input, and those children are checked below. Whether the
@@ -513,8 +534,25 @@
                                  :mount (if-let [t (:ctor-fn nd)] (sub nd (t)) false)
                                  true)))
                         (:nodes ctor))]
-          (vswap! memo assoc k r)
+          (vswap! local assoc k [ctor r])
           r)))))
+
+(defn server-free?
+  "True when no node of ctor (running at site), nor of any ctor it mounts,
+  is computed on or read by the server."
+  [_peer ctor site]
+  (let [k (str "free:" (name site))
+        g (memo-get ctor k)]
+    (if (some? g)
+      g
+      (let [local (volatile! {})
+            r (server-free-in local ctor site)]
+        ;; publish once the walk is complete
+        (doseq [[[_ s] [c v]] @local]
+          (when-let [m (::memo c)]
+            #?(:clj (.put ^java.util.concurrent.ConcurrentHashMap m (str "free:" (name s)) v)
+               :cljs (.set m (str "free:" (name s)) v))))
+        r))))
 
 (defn- skip-child?
   "Demand-driven: the server does not instantiate a subtree it neither
@@ -839,27 +877,13 @@
       :for (fn [f i] (set-cell! f i (compute-for f i nd))))))
 
 (defn- plan-for [peer ctor site]
-  (let [^objects cache (:plans peer)]
-    #?(:clj (let [m ^java.util.IdentityHashMap (get (aget cache 0) site)]
-              (or (.get m ctor)
-                  (let [p (object-array (map #(step peer site %) (:nodes ctor)))]
-                    (.put m ctor p)
-                    p)))
-       :cljs (let [m (get (aget cache 0) site)]
-               (or (.get m ctor)
-                   (let [p (object-array (map #(step peer site %) (:nodes ctor)))]
-                     (.set m ctor p)
-                     p))))))
+  (memo ctor (str "plan:" (name (:site peer)) ":" (name site))
+        #(object-array (map (fn [nd] (step peer site nd)) (:nodes ctor)))))
 
 (defn- deps-of
   "Same-frame dependents as int arrays, cached per ctor."
-  [peer ctor]
-  (let [^objects cache (:plans peer)
-        m (get (aget cache 0) :deps)]
-    (or (#?(:clj .get :cljs .get) m ctor)
-        (let [d (object-array (map #(int-array %) (:dependents ctor)))]
-          (#?(:clj .put :cljs .set) m ctor d)
-          d))))
+  [_peer ctor]
+  (memo ctor "deps" #(object-array (map int-array (:dependents ctor)))))
 
 (defn- process-frame! [^Frame f]
   (let [dirty #?(:clj ^booleans (.-dirty f) :cljs (.-dirty f))
@@ -1282,11 +1306,6 @@
                   :call-callbacks (volatile! {})
                   :next-token (volatile! 0)
                   :render-root? true
-                  :server-free (volatile! {})
-                  :plans (doto (object-array 1)
-                           (aset 0 #?(:clj {:client (java.util.IdentityHashMap.) :server (java.util.IdentityHashMap.)
-                                            :deps (java.util.IdentityHashMap.)}
-                                      :cljs {:client (js/Map.) :server (js/Map.) :deps (js/Map.)})))
                   :shared-acquire #?(:clj (fn [& args] (apply (requiring-resolve 'hypercurve.shared/acquire!) args))
                                      :cljs (fn [& _] (throw (js/Error. "r/shared runs on the server"))))
                   :post! (fn [g] (g))}
@@ -1310,6 +1329,18 @@
 ;; state (values, wire ids, codec tables) is exported here and restored in the
 ;; browser, which then continues the same session: no query runs twice.
 
+(def ^:private ^:dynamic *encodable*
+  "While a snapshot is taken: the values already known to encode (by identity),
+  so a value shared by many frames is checked once."
+  nil)
+
+(defn- encodable? [v]
+  (let [seen *encodable*]
+    (or (and seen #?(:clj (.containsKey ^java.util.IdentityHashMap seen v) :cljs (.has seen v)))
+        (when (try (codec/encode-delta-blob [:v v]) true (catch #?(:clj Exception :cljs :default) _ false))
+          (when seen #?(:clj (.put ^java.util.IdentityHashMap seen v true) :cljs (.set seen v true)))
+          true))))
+
 (defn- portable
   "v as snapshot data, or ::skip when it cannot travel (it will be recomputed)."
   [v]
@@ -1320,9 +1351,7 @@
     (ctor? v) {::ctor (:name v)}
     (instance? #?(:clj clojure.lang.Atom :cljs cljs.core/Atom) v)
     (let [x (portable @v)] (if (= x ::skip) ::skip {::atom x}))
-    :else (if (try (codec/encode-delta-blob [:v v]) true (catch #?(:clj Exception :cljs :default) _ false))
-            v
-            ::skip)))
+    :else (if (encodable? v) v ::skip)))
 
 (defn- revive [peer f i x]
   (cond
@@ -1361,7 +1390,8 @@
   "Everything a browser needs to continue this (client) peer's session."
   [peer]
   (let [root (first (filter #(nil? (:parent %)) (frames peer)))]
-    {:root (frame-resume-snapshot root)
+    {:root (binding [*encodable* #?(:clj (java.util.IdentityHashMap.) :cljs (js/Map.))]
+             (frame-resume-snapshot root))
      :next-wire-id @(:next-wire-id peer)
      :decls @(:decls peer)}))
 
@@ -1412,36 +1442,55 @@
                (recur (inc i) (unsigned-bit-shift-right (js/Math.imul (bit-xor h (.charCodeAt s i)) 0x01000193) 0))
                h))))
 
-(defn tree-structure
-  "What tree-version hashes (for diagnosing version mismatches)."
+(defn- reachable-ctors
+  "Every program table reachable from ctor, each once, in walk order."
   [ctor]
-  (let [seen (volatile! #{})
-        acc (volatile! [])]
+  (let [seen (volatile! #{}) acc (volatile! [])]
     ((fn walk [c]
        (when (and c (not (contains? @seen (:name c))))
          (vswap! seen conj (:name c))
-         ;; structure, not source text: platform-specific code (#?) differs
-         ;; between builds but the protocol is the same
-         (vswap! acc conj [(str (:name c)) (:ret c)
-                           ;; inputs are left out: platform code (#?) may read different
-                           ;; locals on each side without changing what crosses the wire
-                           (mapv (fn [nd] [(:op nd) (:site nd) (sort (:readers nd))
-                                           (:ctx-site nd) (when (:ctor-fn nd) (str (:name ((:ctor-fn nd)))))])
-                                 (:nodes c))
-                           (:holes (:render c))])
+         (vswap! acc conj c)
          (doseq [nd (:nodes c)]
            (doseq [c (:ctors nd)] (walk c))
            (walk (:ctor nd))
            (when-let [t (:ctor-fn nd)] (walk (t))))))
      ctor)
-    (sort-by first @acc)))
+    @acc))
+
+(defn- structure-of [cs]
+  (sort-by first
+           (for [c cs]
+             [(str (:name c)) (:ret c)
+              ;; structure, not source text: platform-specific code (#?) differs
+              ;; between builds but the protocol is the same. Inputs are left
+              ;; out: platform code may read different locals on each side
+              ;; without changing what crosses the wire
+              (mapv (fn [nd] [(:op nd) (:site nd) (sort (:readers nd))
+                              (:ctx-site nd) (when (:ctor-fn nd) (str (:name ((:ctor-fn nd)))))])
+                    (:nodes c))
+              (:holes (:render c))])))
+
+(defn tree-structure
+  "What tree-version hashes (for diagnosing version mismatches)."
+  [ctor]
+  (structure-of (reachable-ctors ctor)))
+
+(defonce ^:private tree-version-cache (atom [nil nil]))
 
 (defn tree-version
   "Hash of the structure of every program table reachable from ctor: the
   JVM and browser builds of the same app agree, and any change that would
   break the protocol (nodes, edges, sites, holes) changes it."
   [ctor]
-  (fnv32 (pr-str (tree-structure ctor))))
+  ;; asked for every session: printing and hashing run again only when some
+  ;; reachable table is a new object (a hot reload)
+  (let [cs (reachable-ctors ctor)
+        [cs0 v] @tree-version-cache]
+    (if (and (= (count cs) (count cs0)) (every? true? (map identical? cs cs0)))
+      v
+      (let [v (fnv32 (pr-str (structure-of cs)))]
+        (reset! tree-version-cache [cs v])
+        v))))
 
 
 ;; ---- hot reload
