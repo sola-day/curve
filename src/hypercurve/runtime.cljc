@@ -34,6 +34,14 @@
 (def pending ::pending)
 (defn pending? [x] (identical? x pending))
 
+(defprotocol Shareable
+  "A reference that many sessions follow at once (hypercurve.shared). r/watch
+  on one acquires a handle instead of an add-watch, and the cell is sent the
+  way r/shared cells are: a version cursor and a delta encoded once."
+  (-share! [r on-change]
+    "Follow r; on-change is called after every change. Returns
+    {:current (fn [] [value version]) :blob (fn [from to] bytes) :release (fn [])}."))
+
 (defrecord Failure [error])
 (defn failure? [x] (instance? Failure x))
 (defn failure [e] (->Failure e))
@@ -558,11 +566,38 @@
             (let [rets (mapv #(child-ret-value (kids %)) ks)]
               (or (some #(when (or (pending? %) (failure? %)) %) rets) rets))))))))
 
+(defn- follow-shareable
+  "Server: r/watch on a Shareable. Holds one handle per cell (released when
+  the reference changes or the frame goes) and records the version read, so
+  the send path ships the shared pre-encoded delta."
+  [f i r]
+  (when-let [[_ unwatch] (get @(:watching f) i)]
+    (unwatch) (vswap! (:watching f) dissoc i))
+  (let [cur (get @(:shared f) i)]
+    (when (and cur (not (identical? r (:ident cur))))
+      ((:release cur))
+      (vswap! (:shared f) dissoc i))
+    (when-not (get @(:shared f) i)
+      (let [peer (:peer f)
+            h (-share! r (fn [] ((:post! peer) #(mark-dirty! f i))))]
+        (vswap! (:shared f) assoc i (assoc h :ident r))))
+    (let [[v version] ((:current (get @(:shared f) i)))]
+      (vswap! (:shared f) assoc-in [i :version] version)
+      v)))
+
 (defn- compute-watch [f i nd]
   (let [r (value f (first (:in nd)))]
-    (if (or (pending? r) (failure? r))
+    (cond
+      (or (pending? r) (failure? r))
       r
+
+      (satisfies? Shareable r)
+      (follow-shareable f i r)
+
+      :else
       (do
+        (when-let [cur (get @(:shared f) i)]
+          ((:release cur)) (vswap! (:shared f) dissoc i))
         (when-let [[old-ref unwatch] (get @(:watching f) i)]
           (when-not (identical? old-ref r) (unwatch)))
         (when-not (identical? r (first (get @(:watching f) i)))
@@ -738,7 +773,10 @@
             id)))))
 
 (defn- queue-send! [f i]
-  (vswap! (:dirty-out (:peer f)) assoc [(:seq-id f) i] [f i]))
+  (let [peer (:peer f) k [(:seq-id f) i]]
+    (when (:debounce (node-at f i))
+      (vswap! (:last-change peer) assoc k (clock/now (:clock peer))))
+    (vswap! (:dirty-out peer) assoc k [f i])))
 
 (defn- encode-value [prev v]
   (cond
@@ -784,11 +822,33 @@
             true)
         (do (vswap! (:last-sent peer) assoc k now) false)))))
 
+(defn- wake-later! [peer k delay-ms]
+  (when-not (contains? @(:rate-wakeups peer) k)
+    (vswap! (:rate-wakeups peer) conj k)
+    (clock/schedule! (:clock peer) delay-ms
+                     (fn [] ((:post! peer)
+                             (fn [] (vswap! (:rate-wakeups peer) disj k)
+                               (when-let [h (:on-schedule peer)] (h))))))))
+
+(defn- debounce-deferred?
+  "A cell with a :debounce hint is sent only once it has stopped changing
+  for that many ms; each change restarts the wait."
+  [peer f i]
+  (when-let [ms (:debounce (node-at f i))]
+    (let [k [(:seq-id f) i]
+          quiet (- (clock/now (:clock peer)) (get @(:last-change peer) k 0))]
+      (when (< quiet ms)
+        ;; a wakeup already pending may be early; it re-checks and re-arms
+        (wake-later! peer k (- ms quiet))
+        true))))
+
 (defn- collect-out! [peer]
   (let [later (volatile! (sorted-map))]
   (doseq [[f i :as e] (vals @(:dirty-out peer))]
     (when (and @(:alive f)
-               (if (rate-deferred? peer f i) (do (vswap! later assoc [(:seq-id f) i] e) false) true))
+               (if (or (debounce-deferred? peer f i) (rate-deferred? peer f i))
+                 (do (vswap! later assoc [(:seq-id f) i] e) false)
+                 true))
       (if-let [sh (let [sh (get @(:shared f) i) v (value f i)]
                     (when (and sh (not (pending? v)) (not (failure? v))) sh))]
         (send-shared! f i sh)
@@ -967,6 +1027,7 @@
                   :clock clock/host
                   :last-sent (volatile! {})
                   :rate-wakeups (volatile! #{})
+                  :last-change (volatile! {})
                   :in-frames (volatile! {})
                   :decls (volatile! {})
                   :stash (volatile! {})

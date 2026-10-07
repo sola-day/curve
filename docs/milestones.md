@@ -89,6 +89,24 @@ M1–M2 不依赖浏览器，可以完全在 JVM 上测；M3 依赖 cljs.analyze
 
 虚拟滚动、上传、WebTransport、更多数据源、部署指南、编辑器插件。按需排期。
 
+## 阶段 4：协作应用（面向 hypercanvas，2026-10-07 增补）
+
+hypercanvas（多人实时画布）是 Hypercurve 的第一个真实应用。对照它的架构（hypercanvas `docs/architecture.md`）核对后，共享层和协作原语还停在"有原语"，缺少生产应用需要的生命周期、持久化、变更元数据和频率控制。以下里程碑都做成通用能力，不写死画布语义。
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| M26 持久共享原子 | `shared/atom-family`：按 key 惰性创建；引用计数（`r/watch` 自动 acquire/release），最后一个观察者离开 `:idle-ms` 后卸载；`:load`（首次创建时从存储加载）、`:flush`（批量写回，`:flush-ms` 防抖 + `:max-wait-ms` 上限，卸载前必刷）；`:validate`（写入前校验，拒绝即抛错） | 打开/关闭会话驱动加载卸载；崩溃前最多丢一个刷新窗口；校验失败不改值 |
+| M27 变更元数据 | `swap-meta!`：写入带 `{:op-id :user ...}`；版本日志记录每次变更的 delta 与元数据；`op-id` 去重（有界窗口）；`listen!` 订阅变更流（持久化、历史、审计用） | 重复 op-id 不生效；监听者按版本顺序收到 delta |
+| M28 共享原子走共享发送路径 | `r/watch` 一个共享原子时，像 `r/shared` 一样用"版本游标 + 编码一次"的 blob 下发：一次变更只做一次 diff（复用写入时已算好的 delta），N 个会话共享同一份字节 | 1 次写入 × 100 会话 = 1 次编码；线路字节只含变化字段 |
+| M29 频率控制 | ① 发送提示 `^{:debounce ms}`（安静 ms 后才发，与 `^{:rate}` 节流并列）；② `hypercurve.timing`：`debounce`、`throttle`（leading/trailing、`flush!`、`cancel!`，走 Clock，虚拟时钟可测）；③ `r/mutation` 选项 `{:debounce ms}`（合并为最后一次调用，乐观投影立即生效）；④ `presence/update!` 支持 `{:rate hz}` 合并 | 虚拟时钟下的确定性测试：N 次输入 → 1 次发送/调用 |
+| M30 二维视口窗口 | `hypercurve.virtual`：`quantize`（视口量化到格子，平移不越格不重算）、`in-rect`（按包围盒过滤）、`grid-index`（均匀网格空间索引，按 delta 增量维护，查询 O(格子数)） | 1 万元素平移只增删边缘元素；量化后小幅平移零重算 |
+| M31 delta 感知的 `r/for` | 客户端收到 map 的 `[:m {:patch ...}]` 时，把被触及的 key 传给下游 `r/for`，只调和这些子项，不再 O(n) 遍历；`r/for` 直接接受 map（按 key 迭代） | 1000 个元素中改 1 个：调和工作量 O(1)（计数断言） |
+| M32 版本历史模块 | `hypercurve.history`：基于 M27 变更流，按"同一用户 + 时间窗口 + 字段冲突即封存"合并相邻变更为版本（字段只存首个 before 与最新 after，抵消净零变更）；快照 + 重放计算任意版本；`restore!` 作为一条新变更写回 | 合并、抵消、并发封存、恢复后再恢复的性质测试 |
+| M33 协作撤销模块 | `hypercurve.undo`：每用户的撤销栈，只记录自己的字段变更；撤销时若该字段已被他人改过则跳过；500 ms 内同对象合并 | 两用户交错编辑的撤销语义测试 |
+| M34 客户端缓存续传 | 客户端保留最近 N 个共享值及其版本；重新观察时把版本带给服务端，服务端从该版本发 delta（日志中已无则发全量） | 返回已看过的画布只传增量 |
+
+顺序依据：M26–M29 是 hypercanvas 的硬前提（房间、乐观、实时频率）；M30–M31 决定大画布性能；M32–M33 是历史与撤销的通用实现；M34 是 nice to have。每个里程碑独立提交，提交信息前缀为里程碑编号。
+
 ## 进度记录
 
 | 里程碑 | 状态 | 完成日期 | 说明 |
@@ -119,6 +137,11 @@ M1–M2 不依赖浏览器，可以完全在 JVM 上测；M3 依赖 cljs.analyze
 | M23 | 完成 | 2026-10-03 | 按表通知数据源、Datomic 与 Postgres CDC 适配器、跨会话批量查询 |
 | M24 | 完成 | 2026-10-03 | canvas 场景图、分桶聚合、diff 感知 foreign、动态程序表、场景基准 |
 | M25 | 完成 | 2026-10-03 | 线路统计、回放、生成测试、跨站点错误位置、比值基线与 CI |
+| M26 | 完成 | 2026-10-07 | `SharedAtom` + `atom-family`：加载、防抖批量写回、按观察者引用计数、空闲卸载（卸载时最后一次写回，过期引用的写入转到新实例）、`:validate` |
+| M27 | 完成 | 2026-10-07 | `swap-meta!` / `reset-meta!`、op-id 去重（最近 4096 个）、`listen!` 与 `:on-change` 按版本顺序收到 `{:version :delta :meta ...}` |
+| M28 | 完成 | 2026-10-07 | `rt/Shareable` 协议：`r/watch` 共享原子走版本游标 + 一次编码；相邻版本直接复用写入时的 delta；`shared-atom` 也改为 SharedAtom |
+| M29 | 完成 | 2026-10-07 | `hypercurve.timing`（debounce / throttle，`:max-wait` `:leading` `:trailing`，`flush!` `cancel!`）；发送提示 `^{:debounce ms}`；`r/mutation {:debounce ms}`；`presence/publisher`（合并 + 限频）、`join!` 可指定 id；JVM 主机时钟改为单个调度线程 |
+| M30 | 完成 | 2026-10-07 | `virtual/quantize` `in-rect` `grid-index` `index-sync` `index-patch` |
 
 阶段 3（生态）按计划为"按需排期"，未纳入本轮；其中部署指南已写（docs/deploy.md）。
 

@@ -370,8 +370,13 @@
 
     hypercurve.core/mutation
     (let [[f opts] args]
-      `(let [g# (hypercurve.core/server ~f)]
-         (fn [& args#] (hypercurve.core/-mutate g# args# ~opts))))
+      (if (and (map? opts) (:debounce opts))
+        ;; one debouncer per mounted mutation; it outlives each handler fn
+        `(let [g# (hypercurve.core/server ~f)
+               d# (hypercurve.core/client (hypercurve.core/-debounced-mutation ~opts))]
+           (fn [& args#] (d# g# args#)))
+        `(let [g# (hypercurve.core/server ~f)]
+           (fn [& args#] (hypercurve.core/-mutate g# args# ~opts)))))
 
     hypercurve.core/projection
     (let [[x] args]
@@ -472,12 +477,14 @@
 (declare compile-form*)
 
 (defn compile-form
-  "Compile form; ^{:rate n} on a form becomes a send-rate hint on its node."
+  "Compile form; ^{:rate n} on a form becomes a send-rate hint on its node,
+  ^{:debounce ms} a send-when-quiet hint."
   [env form]
   (let [id (compile-form* env form)
         m (meta form)
         tag! (fn [k v] (swap! (:nodes (:b env)) update id assoc k v))]
     (when-let [r (:rate m)] (tag! :rate r))
+    (when-let [d (:debounce m)] (tag! :debounce d))
     (when-let [v (:validate m)] (tag! :validate v))
     (when-let [sch (:schema m)]
       (tag! :schema-keys (let [q (if (symbol? sch) (:name (host-resolve (:menv env) sch)) nil)
@@ -723,7 +730,7 @@
                    (get-in [:options :hypercurve/local-server]))))
 
 (defn- emit-node [target nd]
-  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :sid :dead :eq :state])
+  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :debounce :sid :dead :eq :state])
                ;; source location, for errors that cross sites
                (:line (meta (:form nd))) (assoc :line (:line (meta (:form nd)))))]
     (case (:op nd)

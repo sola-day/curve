@@ -6,15 +6,21 @@
   (now [c] "Current time in milliseconds.")
   (schedule! [c delay-ms f] "Run f after delay-ms. Returns a cancel fn."))
 
+#?(:clj
+   (defonce ^:private timer-pool
+     ;; one shared timer thread; timers only hand work off, they never block
+     (delay (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
+              (reify java.util.concurrent.ThreadFactory
+                (newThread [_ r] (doto (Thread. ^Runnable r "hypercurve-timer") (.setDaemon true))))))))
+
 (deftype HostClock []
   Clock
   (now [_] #?(:clj (System/currentTimeMillis) :cljs (.now js/Date)))
   (schedule! [_ delay-ms f]
-    #?(:clj (let [t (doto (Thread. ^Runnable (fn []
-                                              (try (Thread/sleep (long delay-ms)) (f)
-                                                   (catch InterruptedException _ nil))))
-                      (.setDaemon true) (.start))]
-              (fn [] (.interrupt t)))
+    #?(:clj (let [fut (.schedule ^java.util.concurrent.ScheduledExecutorService @timer-pool
+                                 ^Runnable (fn [] (try (f) (catch Throwable e (.printStackTrace e))))
+                                 (long (max 0 delay-ms)) java.util.concurrent.TimeUnit/MILLISECONDS)]
+              (fn [] (.cancel ^java.util.concurrent.ScheduledFuture fut false)))
        :cljs (let [id (js/setTimeout f delay-ms)]
                (fn [] (js/clearTimeout id))))))
 

@@ -3,6 +3,7 @@
   (:refer-clojure :exclude [defn for binding])
   (:require [hypercurve.optimistic]
             [hypercurve.router]
+            [hypercurve.timing]
             [hypercurve.runtime :as rt]
             #?(:clj [hypercurve.compiler :as c]))
   #?(:cljs (:require-macros [hypercurve.core])))
@@ -116,6 +117,35 @@
            (add-watch result ::optimistic (fn [_ r _ v] (when-not (rt/pending? v) (remove-watch r ::optimistic) (done))))
            (done))))
      result)))
+
+(clojure.core/defn -debounced-mutation
+  "The handler behind (r/mutation f {:debounce ms ...}): every call applies its
+  optimistic transform at once, but the server is called only with the last
+  arguments once calls stop for ms (or every :max-wait ms). All transforms
+  pushed in between are dropped when that one call settles."
+  [{:keys [debounce max-wait optimistic]}]
+  (let [[p f] optimistic
+        ids (atom [])
+        send (hypercurve.timing/debounce
+               debounce (cond-> {} max-wait (assoc :max-wait max-wait))
+               (fn [g args]
+                 (let [mine (first (reset-vals! ids []))
+                       done (fn [] (doseq [id mine] (hypercurve.optimistic/drop! p id)))
+                       result (apply g args)]
+                   (when (seq mine)
+                     (if (rt/pending? @result)
+                       (add-watch result ::optimistic
+                                  (fn [_ r _ v] (when-not (rt/pending? v) (remove-watch r ::optimistic) (done))))
+                       (done))))))]
+    (fn [g args]
+      (let [[a & more] args
+            event? #?(:cljs (and (some? a) (instance? js/Event a))
+                      :clj (and (map? a) (contains? a :target)))
+            ;; read the event now: it is reused by the browser after the handler
+            args (if (and event? (empty? more)) [(event-value a)] args)]
+        (when p (swap! ids conj (hypercurve.optimistic/push! p f)))
+        (send g args)
+        nil))))
 
 (def pending rt/pending)
 (def pending? rt/pending?)
