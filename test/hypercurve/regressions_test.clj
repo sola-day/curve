@@ -68,3 +68,27 @@
         hooks (mount/renderer (h/dom) root)
         _ (-> (ct/pair :client-opts (dissoc hooks :mounter)) (ct/mount! ManyLocals) ct/flush!)]
     (is (= "253" (h/text-content (h/query root "p"))))))
+
+(def !calls (atom []))
+
+(r/defn Popup []
+  (let [save! (r/server (fn [x] (swap! !calls conj x) nil))]
+    [:button {:on-click (fn [_] (save! "clicked"))} "save"]))
+
+(r/defn Opens []
+  (let [!open (atom false) open (r/watch !open)]
+    [:div
+     [:a.open {:on-click (fn [_] (reset! !open true))} "open"]
+     (when open (Popup))]))
+
+(deftest calling-a-server-fn-before-its-frame-exists-on-the-server
+  (reset! !calls [])
+  (let [root (h/root)
+        hooks (mount/renderer (h/dom) root)
+        p (-> (ct/pair :client-opts (dissoc hooks :mounter)) (ct/mount! Opens) ct/flush!)]
+    (h/fire! (h/query root "a.open") "click" {})
+    (ct/run-client! p)
+    ;; the popup is on screen, the server has not heard of it yet: click now
+    (h/fire! (h/query root "button") "click" {})
+    (ct/flush! p)
+    (is (= ["clicked"] @!calls) "the call waited for the frame instead of being lost")))

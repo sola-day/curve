@@ -200,6 +200,9 @@
                            :state (boolean (and (seq? form) (empty? ids)
                                                 (contains? '#{atom volatile!} (some-> (core-name env (first form)) name symbol))))
                            :pure (pure-form? env form)
+                           ;; a function literal: the other peer can call it before it arrives
+                           :remote-fn (boolean (and (seq? form) (symbol? (first form))
+                                                    (contains? '#{fn fn*} (symbol (name (first form))))))
                            :eq (when (fresh-collection? form) :identical)}))))
 
 (defn- value-env [env] (assoc env :render? false))
@@ -764,7 +767,7 @@
                    (get-in [:options :hypercurve/local-server]))))
 
 (defn- emit-node [target nd]
-  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :debounce :sid :dead :eq :state :captured])
+  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :debounce :sid :dead :eq :state :captured :remote-fn])
                ;; source location, for errors that cross sites
                (:line (meta (:form nd))) (assoc :line (:line (meta (:form nd)))))]
     (case (:op nd)

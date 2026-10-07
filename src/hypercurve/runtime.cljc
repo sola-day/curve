@@ -231,7 +231,7 @@
 
 ;; ---------------------------------------------------------------- mounting
 
-(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of revive resume-wire! note-delta! slot-unbind!)
+(declare mount-frame! unmount-frame! bind-child! unbind! apply-val! plan-for deps-of revive resume-wire! note-delta! slot-unbind! remote-proxy)
 
 (def ^:private no-holes (object-array 0))
 
@@ -325,6 +325,18 @@
           (case (:op nd)
             :arg nil
             :const (aset ^objects (:vals f) i (:v nd))
+            :call (if (and (:remote-fn nd) (= (node-site f nd) (other-site (:site peer))))
+                    ;; callable at once; calls wait for the frame on the other side
+                    (aset ^objects (:vals f) i (remote-proxy peer f i))
+                    (cond
+                      (and state (contains? state sid))
+                      (aset ^objects (:vals f) i (revive peer f i (get state sid)))
+                      (and resumed (contains? resumed sid)
+                           (or (= (node-site f nd) (other-site (:site peer)))
+                               (not (contains? #{:branch :for :mount :watch :effect :shared :dyn} (:op nd)))))
+                      (aset ^objects (:vals f) i (revive peer f i (get resumed sid)))
+                      :else
+                      (aset #?(:clj ^booleans (:dirty f) :cljs (:dirty f)) i true)))
             (cond
               (and state (contains? state sid))
               (aset ^objects (:vals f) i (revive peer f i (get state sid)))
@@ -1064,6 +1076,11 @@
 (defn- bind! [peer f id]
   (vswap! (:in-frames peer) assoc id f)
   (vreset! (:remote-id f) id)
+  (when-let [calls (get @(:deferred-calls peer) (:seq-id f))]
+    (vswap! (:deferred-calls peer) dissoc (:seq-id f))
+    (doseq [[token i args] calls]
+      (vswap! (:outbox peer) update :call (fnil conj []) [token id i args]))
+    (when-let [hook (:on-schedule peer)] (hook)))
   (when-let [vs (get @(:stash peer) id)]
     (vswap! (:stash peer) dissoc id)
     (doseq [[i d] vs] (apply-val! peer f i d)))
@@ -1089,10 +1106,12 @@
   (with-meta
    (fn [& args]
     (let [token (vswap! (:next-token peer) inc)
-          result (atom pending)
-          id (or @(:remote-id f) (throw (ex-info "hypercurve: remote fn frame unknown" {})))]
-      (vswap! (:outbox peer) update :call (fnil conj []) [token id i (vec args)])
+          result (atom pending)]
       (vswap! (:calls peer) assoc token result)
+      (if-let [id @(:remote-id f)]
+        (vswap! (:outbox peer) update :call (fnil conj []) [token id i (vec args)])
+        ;; the other peer has not mounted this frame yet: send once it has
+        (vswap! (:deferred-calls peer) update (:seq-id f) (fnil conj []) [token i (vec args)]))
       (when-let [hook (:on-schedule peer)] (hook))
       result))
    {::remote true}))
@@ -1225,6 +1244,7 @@
                   :rate-wakeups (volatile! #{})
                   :last-change (volatile! {})
                   :deltas (volatile! {})
+                  :deferred-calls (volatile! {})
                   :slots (volatile! {})
                   :slot-vals (volatile! {})
                   :cell-slot (volatile! {})
