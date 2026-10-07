@@ -84,7 +84,7 @@
    (defn install!
      "Follow the browser: read the current URL, track back/forward, and turn
      same-origin link clicks into client navigation (opt out per link with
-     a data-reload attribute)."
+     a data-reload attribute; download links are left alone)."
      []
      (let [sync! #(reset! !location (location-of (str (.. js/location -pathname) (.. js/location -search)))) ]
        (sync!)
@@ -96,6 +96,9 @@
                                          (not (or (.-metaKey e) (.-ctrlKey e) (.-shiftKey e) (.-altKey e)))
                                          (not (.hasAttribute a "data-reload"))
                                          (not (.hasAttribute a "target"))
+                                         ;; downloads and blob:/data: links are not pages
+                                         (not (.hasAttribute a "download"))
+                                         (#{"http:" "https:"} (.-protocol a))
                                          (= (.-origin a) (.. js/location -origin)))
                                 (.preventDefault e)
                                 (navigate! (str (.-pathname a) (.-search a))))))))))
