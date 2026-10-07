@@ -722,6 +722,20 @@
                                    (assoc nd :dead true) nd))
                       nodes))))
 
+(defn with-captured
+  "Mark nodes passed into child frames (branch and loop captures, arguments
+  of reactive calls). A link node whose value is only used that way must
+  still follow its children's results."
+  [nodes]
+  (let [ids (into #{} (mapcat (fn [nd]
+                                (case (:op nd)
+                                  :branch (apply concat (:args nd))
+                                  :for (:args nd)
+                                  :mount (:in nd)
+                                  nil)))
+                  nodes)]
+    (vec (map-indexed (fn [i nd] (if (contains? ids i) (assoc nd :captured true) nd)) nodes))))
+
 (defn with-readers [nodes]
   (let [rs (reduce (fn [acc nd]
                      (let [sites (reader-sites nd)]
@@ -746,7 +760,7 @@
                    (get-in [:options :hypercurve/local-server]))))
 
 (defn- emit-node [target nd]
-  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :debounce :sid :dead :eq :state])
+  (let [base (cond-> (select-keys nd [:op :site :in :readers :ctx-site :rate :debounce :sid :dead :eq :state :captured])
                ;; source location, for errors that cross sites
                (:line (meta (:form nd))) (assoc :line (:line (meta (:form nd)))))]
     (case (:op nd)
@@ -804,7 +818,7 @@
   "Emit code that builds the runtime ctor for a compiled builder."
   [target {:keys [b ret name site extra file]}]
   (let [render (or @(:render b) (derived-render b ret))
-        nodes (with-sids name (with-dead (with-readers @(:nodes b)) ret (:holes render)))]
+        nodes (with-sids name (with-dead (with-captured (with-readers @(:nodes b))) ret (:holes render)))]
     `(hypercurve.runtime/ctor
        ~(merge {:name (list 'quote name)
                 :ret ret

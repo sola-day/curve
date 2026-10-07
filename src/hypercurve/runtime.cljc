@@ -439,7 +439,7 @@
   rendered never needs its children's return values."
   [f i]
   (let [nd (node-at f i)]
-    (boolean (or (seq (:readers nd)) (= i (:ret (:ctor f))) (aget ^objects (:exported f) i)))))
+    (boolean (or (seq (:readers nd)) (:captured nd) (= i (:ret (:ctor f))) (aget ^objects (:exported f) i)))))
 
 (defn- link-child!
   "Make node i of f follow child c's return value, when that value is used."

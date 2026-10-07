@@ -2,6 +2,8 @@
   "Issues found building Hypercanvas."
   (:require [clojure.test :refer [deftest is testing]]
             [hypercurve.core :as r]
+            [hypercurve.headless :as h]
+            [hypercurve.mount :as mount]
             [hypercurve.runtime :as rt]
             [hypercurve.test :as ct]))
 
@@ -32,3 +34,26 @@
     (is (= 1 server-frames) "the server mounts only the root, not the panel")
     (is (empty? (filter #(= :c->s (:dir %)) (filter #(seq (:vals (:msg %))) (ct/wire-log p))))
         "nothing is uploaded")))
+
+(def !rows (atom [1 2 3]))
+
+(r/defn ServerBranch [on]
+  (let [v (r/server (if on (mapv inc (r/watch !rows)) []))]
+    [:p (str (count v))]))
+
+(deftest a-server-branch-value-reaches-the-client
+  (let [p (-> (ct/pair) (ct/mount! ServerBranch true) ct/flush!)]
+    (is (some #(= [2 3 4] %) (seq (:vals (:client-root p)))) "the branch's value crossed")))
+
+(r/defn Count [xs] [:b (str (count xs))])
+
+(r/defn PassedOn [on]
+  ;; the branch's value is only passed to another component
+  (let [v (r/server (if on (mapv inc (r/watch !rows)) []))]
+    [:p (if on (Count v) "off")]))
+
+(deftest a-branch-value-only-passed-on
+  (let [root (h/root)
+        hooks (mount/renderer (h/dom) root)
+        p (-> (ct/pair :client-opts (dissoc hooks :mounter)) (ct/mount! PassedOn true) ct/flush!)]
+    (is (= "3" (some-> (h/query root "b") h/text-content)) "Count received the server branch's value")))
