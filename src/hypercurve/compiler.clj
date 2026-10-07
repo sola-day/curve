@@ -190,7 +190,11 @@
           params (mapv #(get renames % %) syms)
           body (if (seq renames) (clojure.walk/postwalk-replace renames form) form)]
       (add-node! (:b env) {:op :call :site (:site env)
-                           :code `(fn [~@params] ~body) :in ids :form form
+                           ;; Clojure fns take at most 20 fixed params
+                           :code (if (> (count params) 20)
+                                   (let [args (gensym "args")] `(fn [& ~args] (let [[~@params] ~args] ~body)))
+                                   `(fn [~@params] ~body))
+                           :in ids :form form
                            :params params :pseudo body
                            ;; creates per-frame state (kept by hot reload and resume)
                            :state (boolean (and (seq? form) (empty? ids)

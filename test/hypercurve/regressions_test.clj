@@ -57,3 +57,14 @@
         hooks (mount/renderer (h/dom) root)
         p (-> (ct/pair :client-opts (dissoc hooks :mounter)) (ct/mount! PassedOn true) ct/flush!)]
     (is (= "3" (some-> (h/query root "b") h/text-content)) "Count received the server branch's value")))
+
+(r/defn ManyLocals []
+  (let [a1 1 a2 2 a3 3 a4 4 a5 5 a6 6 a7 7 a8 8 a9 9 a10 10 a11 11 a12 12
+        a13 13 a14 14 a15 15 a16 16 a17 17 a18 18 a19 19 a20 20 a21 21 a22 22]
+    [:p (str (+ a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22))]))
+
+(deftest more-than-twenty-locals-in-one-expression
+  (let [root (h/root)
+        hooks (mount/renderer (h/dom) root)
+        _ (-> (ct/pair :client-opts (dissoc hooks :mounter)) (ct/mount! ManyLocals) ct/flush!)]
+    (is (= "253" (h/text-content (h/query root "p"))))))
