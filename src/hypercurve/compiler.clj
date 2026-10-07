@@ -169,6 +169,15 @@
 (defn- literal? [x]
   (or (nil? x) (boolean? x) (number? x) (string? x) (keyword? x) (char? x)))
 
+(defn- data-literal?
+  "A collection literal of literals ({:width \"20px\"}): a constant, built
+  once at load instead of by a fn node."
+  [x]
+  (and (or (map? x) (vector? x) (set? x))
+       ;; source positions only: a ^{:rate n} hint needs a real node
+       (empty? (dissoc (meta x) :line :column :end-line :end-column :file))
+       (every? #(or (literal? %) (data-literal? %)) (if (map? x) (mapcat identity x) x))))
+
 ;; ------------------------------------------------------------------ compile
 
 (declare compile-form compile-body)
@@ -180,7 +189,7 @@
 (defn- lift
   "One host fn node computing form from the reactive locals it mentions."
   [env form]
-  (if (literal? form)
+  (if (or (literal? form) (data-literal? form))
     (const! env form)
     (let [_ (check-no-mutation! env form)
           syms (free-locals env form)
@@ -810,19 +819,23 @@
   so an unchanged subexpression keeps its id when the function around it is
   edited. Hot reload carries local state across by these ids."
   [ctor-name nodes]
-  (let [seen (volatile! {})]
+  (let [seen (volatile! {})
+        taken (volatile! #{})]
     (reduce (fn [acc nd]
               (let [base (hash [(:op nd) (pr-str (normalize (or (:form nd) (:v nd) (:var nd) (:code nd))))
                                 (mapv #(:sid (nth acc %)) (:in nd))
                                 (when (= :arg (:op nd)) (count acc))])
                     n (get @seen base 0)
-                    sid (if (zero? n) base (hash [base n]))]
+                    h (if (zero? n) base (hash [base n]))
+                    ;; ids only need to be unique within a table: 16 bits, the
+                    ;; next free one on a collision (both builds compute the same)
+                    sid (loop [s (mod h 65536)] (if (contains? @taken s) (recur (mod (inc s) 65536)) s))]
                 (vswap! seen assoc base (inc n))
+                (vswap! taken conj sid)
                 (conj acc (assoc nd :sid sid))))
             [] nodes)))
 
-(defn emit-ctor
-  "Emit code that builds the runtime ctor for a compiled builder."
+(defn- emit-ctor-form
   [target {:keys [b ret name site extra file]}]
   (let [render (or @(:render b) (derived-render b ret))
         nodes (with-sids name (with-dead (with-captured (with-readers @(:nodes b))) ret (:holes render)))]
@@ -837,6 +850,81 @@
                                  {:tree (list 'quote (:tree render))}))}
                (when site {:site site})
                extra))))
+
+;; ---- compact tables for the browser build
+;;
+;; Written out as ClojureScript literals, a table costs a constructor call
+;; per node, set and vector, and that was most of an app's bundle. The
+;; browser build gets each top-level table as one JSON string (data only)
+;; plus an array of the code it refers to, decoded once at load by
+;; hypercurve.runtime/decode-ctor. Encoding: keyword ":k", symbol "'s",
+;; strings starting with : ' ~ get a leading ~; tagged arrays ["~m" k v ...]
+;; map, ["~s" ...] set, ["~l" ...] list, ["~f" i] code i, ["~c" m] a ctor.
+;; Node flags that are false or nil are left out (read for truthiness only).
+
+(def ^:private flag-keys #{:state :remote-fn :eq :dead :captured :recycle :keyed})
+
+(defn- json-str [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (doseq [c s]
+      (case c
+        \" (.append sb "\\\"")
+        \\ (.append sb "\\\\")
+        (if (or (< (int c) 0x20) (= c \u2028) (= c \u2029))
+          (.append sb (format "\\u%04x" (int c)))
+          (.append sb c))))
+    (str (.append sb "\""))))
+
+(defn- json-seq [tag xs enc]
+  (str "[" (clojure.string/join "," (cond->> (map enc xs) tag (cons (json-str tag)))) "]"))
+
+(defn- enc-data [x code!]
+  (let [enc #(enc-data % code!)]
+    (cond
+      (nil? x) "null"
+      (boolean? x) (str x)
+      (string? x) (json-str (if (re-find #"^[:'~]" x) (str "~" x) x))
+      (keyword? x) (json-str (str ":" (subs (str x) 1)))
+      (symbol? x) (json-str (str "'" x))
+      (and (integer? x) (<= -9007199254740991 x 9007199254740991)) (str (long x))
+      (and (instance? Double x) (Double/isFinite x)) (str x)
+      (map? x) (json-seq "~m" (apply concat x) enc)
+      (set? x) (json-seq "~s" x enc)
+      (vector? x) (json-seq nil x enc)
+      (seq? x) (json-seq "~l" x enc)
+      :else (code! (list 'quote x)))))
+
+(defn- enc-form
+  "JSON for an emitted ctor form; code goes through code!."
+  [x code!]
+  (let [enc #(enc-form % code!)]
+    (cond
+      (and (seq? x) (= 'quote (first x))) (enc-data (second x) code!)
+      (and (seq? x) (= 'hypercurve.runtime/ctor (first x))) (str "[\"~c\"," (enc (second x)) "]")
+      (map? x) (json-seq "~m" (apply concat (remove (fn [[k v]] (and (contains? x :op) (flag-keys k) (not v))) x)) enc)
+      (vector? x) (json-seq nil x enc)
+      (set? x) (json-seq "~s" x enc)
+      (or (nil? x) (boolean? x) (string? x) (keyword? x) (number? x)) (enc-data x code!)
+      :else (code! x))))
+
+(defn compact-ctor
+  "(hypercurve.runtime/decode-ctor json (array code...)) for a ctor form."
+  [form]
+  (let [code (atom [])
+        code! (fn [f] (swap! code conj f) (str "[\"~f\"," (dec (count @code)) "]"))
+        json (enc-form form code!)]
+    `(hypercurve.runtime/decode-ctor ~json (cljs.core/array ~@@code))))
+
+(defn emit-ctor
+  "Emit code that builds the runtime ctor for a compiled builder."
+  [target c]
+  (emit-ctor-form target c))
+
+(defn- emit-top-ctor
+  "emit-ctor for a whole r/defn: compact in the browser build."
+  [target c]
+  (cond-> (emit-ctor-form target c)
+    (contains? #{:cljs :cljs-local} target) compact-ctor))
 
 ;; ------------------------------------------------------------------ entry
 
@@ -946,8 +1034,8 @@
     (when (= target :clj)
       (check-taint! menv qname b ret (count syms))
       (record-boundary! qname b ret))
-    (emit-ctor target {:b b :ret ret :name qname
-                       :site (when (not= site :inherit) site)})))
+    (emit-top-ctor target {:b b :ret ret :name qname
+                           :site (when (not= site :inherit) site)})))
 
 (defn analyze
   "Compile a form for inspection (tests, tooling): returns the emitted code."

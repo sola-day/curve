@@ -92,3 +92,29 @@
     (h/fire! (h/query root "button") "click" {})
     (ct/flush! p)
     (is (= ["clicked"] @!calls) "the call waited for the frame instead of being lost")))
+
+;; ---- compact tables (bundle size)
+
+(defn- table-nodes [form] (:nodes (second form)))
+
+(deftest literal-collections-are-constants
+  (let [form (hypercurve.compiler/analyze 'x/S '[a] '([:div {:style {:width "20vw" :opacity "0.1"}} (str a)]))
+        consts (keep #(when (= :const (:op %)) (second (:v %))) (table-nodes form))]
+    (is (some #{{:width "20vw" :opacity "0.1"}} consts) "a literal style map is a const, not a fn node")))
+
+(deftest node-ids-are-short-and-unique
+  (let [form (hypercurve.compiler/analyze 'x/T '[a b] '([:div (str a) (str a) (str b) (inc a) (dec b)]))
+        sids (map :sid (table-nodes form))]
+    (is (every? #(< -1 % 65536) sids))
+    (is (= (count sids) (count (set sids))))))
+
+(deftest compact-ctor-encodes-data-and-code
+  (let [form (hypercurve.compiler/analyze 'x/U '[a] '([:p {:class "x"} (str a ":" "~")]))
+        [op json fns] (hypercurve.compiler/compact-ctor form)]
+    (is (= 'hypercurve.runtime/decode-ctor op))
+    (is (string? json))
+    (is (clojure.string/starts-with? json "[\"~c\",[\"~m\""))
+    (is (clojure.string/includes? json "\"'x/U\"") "symbols keep a ' prefix")
+    (is (= 'cljs.core/array (first fns)))
+    (is (seq (rest fns)) "lifted fns go to the code array")
+    (is (not (clojure.string/includes? json ":state\",false")) "false flags are left out")))

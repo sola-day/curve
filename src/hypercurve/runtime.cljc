@@ -76,6 +76,31 @@
                      {} (map-indexed vector nodes))]
     (assoc m :dependents (mapv #(get deps % []) (range (count nodes))))))
 
+#?(:cljs
+   (defn decode-ctor
+     "A ctor from the browser build's compact table (hypercurve.compiler/
+     compact-ctor): JSON data, code taken from fns by index."
+     [json fns]
+     (letfn [(d [x]
+               (cond
+                 (string? x) (case (.charAt x 0)
+                               ":" (keyword (subs x 1))
+                               "'" (symbol (subs x 1))
+                               "~" (subs x 1)
+                               x)
+                 (array? x) (case (when (pos? (alength x)) (aget x 0))
+                              "~m" (loop [i 1 m (transient {})]
+                                     (if (< i (alength x))
+                                       (recur (+ i 2) (assoc! m (d (aget x i)) (d (aget x (inc i)))))
+                                       (persistent! m)))
+                              "~s" (into #{} (map d) (.slice x 1))
+                              "~l" (apply list (map d (.slice x 1)))
+                              "~f" (aget fns (aget x 1))
+                              "~c" (ctor (d (aget x 1)))
+                              (into [] (map d) x))
+                 :else x))]
+       (d (js/JSON.parse json)))))
+
 ;; ---- reactive fns by name: they cross the wire as references, so a ctor
 ;; held in a value (e.g. loaded lazily from a code-split module) can be
 ;; mounted with r/call on both peers

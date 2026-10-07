@@ -26,7 +26,8 @@
          `(do (def ~(vary-meta name assoc ::reactive true :doc doc)
                 ~(c/compile-defn &env qname params body {:site site}))
               (rt/register-ctor! ~name)
-              (var ~name))))
+              ;; a var object in cljs is dead weight in the bundle
+              ~(when-not (:ns &env) `(var ~name)))))
 
      (clojure.core/defn- only-in-reactive [form]
        (throw (ex-info (str "hypercurve: " (first form) " is only valid inside r/defn") {:form form})))
