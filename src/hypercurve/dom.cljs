@@ -6,10 +6,22 @@
 
 (def ^:private templates (js/Map.))
 
+(def ^:private svg-tags
+  ;; elements that only exist inside <svg>: a template starting with one is
+  ;; the child of an svg element (e.g. the body of an r/for in an <svg>)
+  #{"path" "g" "circle" "ellipse" "line" "polyline" "polygon" "rect" "text" "tspan"
+    "use" "defs" "clipPath" "mask" "pattern" "linearGradient" "radialGradient" "stop"
+    "foreignObject" "symbol" "marker" "filter"})
+
+(defn- svg-child? [html]
+  (when-let [[_ tag] (re-find #"^\s*<([a-zA-Z][\w-]*)" html)]
+    (contains? svg-tags tag)))
+
 (defn- template [html]
   (or (.get templates html)
       (let [t (.createElement js/document "template")]
-        (set! (.-innerHTML t) html)
+        ;; parsed inside <svg> so the elements get the SVG namespace
+        (set! (.-innerHTML t) (if (svg-child? html) (str "<svg>" html "</svg>") html))
         (.set templates html t)
         t)))
 
@@ -36,8 +48,10 @@
 (deftype BrowserDom []
   api/Dom
   (instantiate [_ render]
-    (let [frag (.cloneNode (.-content (template (:html render))) true)]
-      (vec (array-seq (.-childNodes frag)))))
+    (let [html (:html render)
+          frag (.cloneNode (.-content (template html)) true)
+          host (if (svg-child? html) (.-firstChild frag) frag)]
+      (vec (array-seq (.-childNodes host)))))
   (child-at [_ n i] (aget (.-childNodes n) i))
   (text-node [_ s] (.createTextNode js/document s))
   (replace-node! [_ old new] (.replaceWith old new))
