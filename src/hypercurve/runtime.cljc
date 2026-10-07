@@ -393,12 +393,27 @@
 
       :else nil)))
 
+(declare server-free?)
+
+(defn- server-skipped?
+  "Client: does the server leave this frame out (skip-child?)? Then nothing
+  in it is sent to the server: its :server readers were only the server's
+  mirror of branches and loops, which the server does not build."
+  [f]
+  (let [peer (:peer f) parent (:parent f)]
+    (boolean
+      (and (= :client (:site peer)) parent
+           (or (server-skipped? parent)
+               (and (not-any? #(= :server (resolve-site parent %)) (:readers (node-at parent (:node f))))
+                    (server-free? peer (:ctor f) (:site f))))))))
+
 (defn- export! [f]
   (let [me (:site (:peer f))
         other (other-site me)]
-    (doseq [[i nd] (map-indexed vector (:nodes (:ctor f)))]
-      (when (some #(= other (resolve-site f %)) (:readers nd))
-        (remote-read! f i)))
+    (when-not (server-skipped? f)
+      (doseq [[i nd] (map-indexed vector (:nodes (:ctor f)))]
+        (when (some #(= other (resolve-site f %)) (:readers nd))
+          (remote-read! f i))))
     ;; a rendered frame's template holes are read by the client
     (when (and @(:rendered f) (= me :server))
       (doseq [hole (:holes (:render (:ctor f)))]
@@ -447,9 +462,13 @@
         (vswap! memo assoc k false) ; recursion: assume the worst
         (let [rs (fn [s] (if (= s :inherit) site s))
               sub (fn [nd c] (or (nil? c) (server-free? peer c (or (rs (:ctx-site nd)) site))))
+              ;; readers are not checked: in a ctor with no server node, a
+              ;; :server reader can only be a branch, loop or mount mirroring
+              ;; its input, and those children are checked below. Whether the
+              ;; server reads the ctor's own result is the caller's question
+              ;; (skip-child? looks at the link node's readers).
               r (every? (fn [nd]
                           (and (not= :server (rs (:site nd)))
-                               (not-any? #(= :server (rs %)) (:readers nd))
                                (case (:op nd)
                                  :shared false
                                  :branch (every? #(sub nd %) (:ctors nd))

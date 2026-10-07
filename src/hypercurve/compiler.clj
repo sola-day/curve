@@ -175,7 +175,7 @@
 
 (defn- const! [env v] (add-node! (:b env) {:op :const :v v}))
 
-(declare check-no-mutation! pure-form? fresh-collection? core-name)
+(declare check-no-mutation! pure-form? fresh-collection? core-name compile-site)
 
 (defn- lift
   "One host fn node computing form from the reactive locals it mentions."
@@ -411,8 +411,8 @@
       :else
       (let [{q :name macro? :macro} (host-resolve (:menv env) h)]
         (cond
-          (= q 'hypercurve.core/server) (compile-body (assoc env :site :server :render? false) args)
-          (= q 'hypercurve.core/client) (compile-body (assoc env :site :client) args)
+          (= q 'hypercurve.core/server) (compile-site env :server (assoc env :site :server :render? false) args)
+          (= q 'hypercurve.core/client) (compile-site env :client (assoc env :site :client) args)
           (= q 'hypercurve.core/for) (compile-for env form)
           (= q 'hypercurve.core/watch)
           (let [rid (compile-form (value-env env) (first args))]
@@ -472,6 +472,21 @@
           (reactive-free? env form) (lift env form)
           macro? (compile-form env (host-macroexpand-1 (:menv env) form))
           :else (compile-call env form))))))
+
+(declare compile-body)
+
+(defn- compile-site
+  "(r/server body) / (r/client body). When the body is just a local (an
+  argument, a value from the other site) no node of the requested site
+  exists yet: add an identity call there, so the value really moves sites.
+  Otherwise a client root without the argument would never see it."
+  [env site site-env args]
+  (let [n0 (count @(:nodes (:b env)))
+        id (compile-body site-env args)]
+    (if (and (< id n0) (not= site (:site (nth @(:nodes (:b env)) id))))
+      (add-node! (:b env) {:op :call :site site :code `(fn [x#] x#) :in [id]
+                           :form (cons 'identity args) :params ['x] :pseudo 'x :pure true})
+      id)))
 
 (declare compile-element)
 
