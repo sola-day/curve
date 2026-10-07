@@ -71,7 +71,7 @@ Hypercurve is not on Clojars yet. Depend on it from git:
 
 ```clojure
 ;; deps.edn
-{:deps {io.github.sola-day/hypercurve {:git/sha "53ddca3b8ea7ba25b7f36be73ce8f3702cd092e1"}
+{:deps {io.github.sola-day/hypercurve {:git/sha "74807f90f3d33289906517f2963936b16936135a"}
         ring/ring-jetty-adapter  {:mvn/version "1.15.3"}}
  :aliases
  {:cljs {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
