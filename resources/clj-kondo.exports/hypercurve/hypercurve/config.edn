@@ -1,0 +1,4 @@
+{:lint-as {hypercurve.core/defn clojure.core/defn
+           hypercurve.core/for clojure.core/for
+           hypercurve.core/binding clojure.core/binding}
+ :linters {:unresolved-symbol {:exclude [(hypercurve.core/for)]}}}

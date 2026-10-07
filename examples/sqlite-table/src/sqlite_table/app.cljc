@@ -1,6 +1,6 @@
 (ns sqlite-table.app
   "Login, then a live, editable products table shared by every session."
-  (:require [curve.core :as r]
+  (:require [hypercurve.core :as r]
             #?(:clj [sqlite-table.db :as db])))
 
 (r/defn ProductRow [{:keys [id name price]} update! delete!]

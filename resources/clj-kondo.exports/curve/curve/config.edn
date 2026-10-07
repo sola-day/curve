@@ -1,4 +1,0 @@
-{:lint-as {curve.core/defn clojure.core/defn
-           curve.core/for clojure.core/for
-           curve.core/binding clojure.core/binding}
- :linters {:unresolved-symbol {:exclude [(curve.core/for)]}}}

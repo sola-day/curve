@@ -1,5 +1,5 @@
 (ns hello.app
-  (:require [curve.core :as r]))
+  (:require [hypercurve.core :as r]))
 
 #?(:clj (defonce !clicks (atom 0)))
 #?(:clj (defonce !messages (atom [])))
@@ -9,7 +9,7 @@
         draft (r/watch !draft)
         post! (r/server (fn [text] (swap! !messages conj text)))]
     [:main
-     [:h1 "Hello from Curve"]
+     [:h1 "Hello from Hypercurve"]
      [:p "Server clicks: " [:b.count (r/server (r/watch !clicks))]]
      [:button#inc {:on-click (r/server (fn [_] (swap! !clicks inc)))} "click"]
      [:p "You typed: " [:i draft]]

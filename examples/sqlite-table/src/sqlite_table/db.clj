@@ -1,8 +1,8 @@
 (ns sqlite-table.db
   "SQLite access for the example: users with salted password hashes and an
-  editable products table. Writes go through curve.source/write!, which
+  editable products table. Writes go through hypercurve.source/write!, which
   bumps the source version so every live query re-runs once."
-  (:require [curve.source :as src])
+  (:require [hypercurve.source :as src])
   (:import [java.security MessageDigest SecureRandom]
            [java.util HexFormat]))
 

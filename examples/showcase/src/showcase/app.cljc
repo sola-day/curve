@@ -2,8 +2,8 @@
   "A long page: a list of 100,000 rows of varying height in a virtual
   window, and a comments section far below that mounts (and queries the
   server) only when scrolled into view."
-  (:require [curve.core :as r]
-            [curve.virtual :as v]))
+  (:require [hypercurve.core :as r]
+            [hypercurve.virtual :as v]))
 
 #?(:clj (defonce queries (atom 0)))
 #?(:clj (defn load-comments! [] (str "queried " (swap! queries inc) " time(s)")))

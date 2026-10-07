@@ -1,4 +1,4 @@
-# Curve
+# Hypercurve
 
 **One reactive Clojure program for the browser and the server.**
 You write a single function tree. The compiler decides, expression by
@@ -7,7 +7,7 @@ structural diffs of changed values travel between them.
 
 ```clojure
 (ns app.chat
-  (:require [curve.core :as r]))
+  (:require [hypercurve.core :as r]))
 
 #?(:clj (defonce !messages (atom [])))
 
@@ -33,7 +33,7 @@ wire.
 
 ## Contents
 
-- [Why Curve](#why-curve)
+- [Why Hypercurve](#why-hypercurve)
 - [Getting started](#getting-started)
 - [The language](#the-language)
 - [Server, sessions and data](#server-sessions-and-data)
@@ -48,9 +48,9 @@ wire.
 
 ---
 
-## Why Curve
+## Why Hypercurve
 
-Curve builds on the idea behind Electric Clojure that the network boundary
+Hypercurve builds on the idea behind Electric Clojure that the network boundary
 can be inferred by a compiler. It then adds what a production app needs
 around that idea:
 
@@ -67,11 +67,11 @@ around that idea:
 
 ### Install
 
-Curve is not on Clojars yet. Depend on it from git:
+Hypercurve is not on Clojars yet. Depend on it from git:
 
 ```clojure
 ;; deps.edn
-{:deps {io.github.sola-day/curve {:git/sha "53ddca3b8ea7ba25b7f36be73ce8f3702cd092e1"}
+{:deps {io.github.sola-day/hypercurve {:git/sha "53ddca3b8ea7ba25b7f36be73ce8f3702cd092e1"}
         ring/ring-jetty-adapter  {:mvn/version "1.15.3"}}
  :aliases
  {:cljs {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
@@ -84,7 +84,7 @@ Curve is not on Clojars yet. Depend on it from git:
 
 ```clojure
 (ns app.main
-  (:require [curve.core :as r]))
+  (:require [hypercurve.core :as r]))
 
 #?(:clj (defonce !clicks (atom 0)))
 
@@ -99,8 +99,8 @@ Curve is not on Clojars yet. Depend on it from git:
 ```clojure
 (ns app.server
   (:require [app.main :as app]
-            [curve.server :as cs]
-            [curve.ssr :as ssr]
+            [hypercurve.server :as cs]
+            [hypercurve.ssr :as ssr]
             [ring.adapter.jetty :as jetty]
             [ring.util.response :as resp]))
 
@@ -108,7 +108,7 @@ Curve is not on Clojars yet. Depend on it from git:
 
 (defn handler [req]
   (case (:uri req)
-    "/curve" (ws req)
+    "/hypercurve" (ws req)
     "/"      (-> (resp/response (ssr/page (ssr/render app/App [] :url "/")
                                           {:title "My app" :script "/js/main.js"}))
                  (resp/content-type "text/html; charset=utf-8"))
@@ -123,7 +123,7 @@ Curve is not on Clojars yet. Depend on it from git:
 ```clojure
 (ns app.client
   (:require [app.main :as app]
-            [curve.client :as client]))
+            [hypercurve.client :as client]))
 
 (defn ^:export init [] (client/start! app/App))
 ```
@@ -228,14 +228,14 @@ input's value.
 
 | Namespace | What it gives you |
 |---|---|
-| `curve.forms` | Form state, field binding, client validators, and submission to a server fn whose returned errors show next to the fields. |
-| `curve.virtual` | Virtual scrolling with fixed or measured variable row heights. Only rows in view are rendered or sent. |
-| `curve.select` | O(1) selection, so only the rows whose "selected?" changes update. |
-| `curve.canvas` | Render the same hiccup to a `<canvas>` scene graph, with hit-tested events. |
-| `curve.agg` | Time-bucket aggregation that, for appended data, costs O(new points). |
-| `curve.presence`, `curve.shared/shared-atom` | Collaboration: who is here, and state shared by all sessions. |
-| `curve.local` | Run the server site in a Web Worker: same program, same protocol, no network. |
-| `curve.dynamic` | Compile reactive code at run time (notebooks, plugins) into data. An allow-list interpreter runs it, never `eval`. |
+| `hypercurve.forms` | Form state, field binding, client validators, and submission to a server fn whose returned errors show next to the fields. |
+| `hypercurve.virtual` | Virtual scrolling with fixed or measured variable row heights. Only rows in view are rendered or sent. |
+| `hypercurve.select` | O(1) selection, so only the rows whose "selected?" changes update. |
+| `hypercurve.canvas` | Render the same hiccup to a `<canvas>` scene graph, with hit-tested events. |
+| `hypercurve.agg` | Time-bucket aggregation that, for appended data, costs O(new points). |
+| `hypercurve.presence`, `hypercurve.shared/shared-atom` | Collaboration: who is here, and state shared by all sessions. |
+| `hypercurve.local` | Run the server site in a Web Worker: same program, same protocol, no network. |
+| `hypercurve.dynamic` | Compile reactive code at run time (notebooks, plugins) into data. An allow-list interpreter runs it, never `eval`. |
 
 ## Server, sessions and data
 
@@ -254,18 +254,18 @@ posted to that queue, and it sends one batch per turn.
   each key and its captured values. Each session keeps only a version cursor
   into a log of recent values. A change is encoded once and the same bytes
   go to every session.
-- **Data sources.** `curve.source` provides live queries that subscribe only
+- **Data sources.** `hypercurve.source` provides live queries that subscribe only
   while something watches them. Adapters:
 
   | Adapter | Cost per write |
   |---|---|
   | `mem-source`, `poll-ref`, `jdbc-source` | One re-query per write. |
-  | `curve.source.sqlite` | Uses the update hook. Keyed queries re-read only the changed row. |
+  | `hypercurve.source.sqlite` | Uses the update hook. Keyed queries re-read only the changed row. |
   | `table-source` + `changed!` | Re-runs only queries reading the changed tables. Fits CDC, Redis or Kafka events. |
-  | `curve.source.postgres` | Feeds wal2json logical replication into table events. |
-  | `curve.source.datomic` | Uses the transaction report queue, filtered by the attributes each query reads. |
+  | `hypercurve.source.postgres` | Feeds wal2json logical replication into table events. |
+  | `hypercurve.source.datomic` | Uses the transaction report queue, filtered by the attributes each query reads. |
 
-  `curve.batch/loader` merges concurrent loads from many sessions into one
+  `hypercurve.batch/loader` merges concurrent loads from many sessions into one
   batch query, in the style of DataLoader.
 - **Budgets.** Each session has limits on nodes, bytes per second and turn
   time. Over the bandwidth limit a session first slows down and coalesces;
@@ -275,7 +275,7 @@ posted to that queue, and it sends one batch per turn.
   Sessions hibernate when idle and wake on the next message.
   `session/migrate!` moves clients to another node with their local state.
   A client running old code reloads once and keeps its local state.
-- **Metrics.** `(curve.session/metrics-snapshot)`
+- **Metrics.** `(hypercurve.session/metrics-snapshot)`
 
 See [docs/deploy.md](docs/deploy.md) for load balancing, rolling deploys and
 a capacity checklist.
@@ -285,7 +285,7 @@ a capacity checklist.
 ```clojure
 (ssr/render App [] :url "/products")          ; => {:html :state :token :tier}
 (ssr/render-stream App [] {:title "…" :script "/js/main.js"})   ; lazy seq of HTML chunks
-(curve.static/build! {:ctor App :urls ["/" "/about"] :out "dist" :script "/js/main.js"})
+(hypercurve.static/build! {:ctor App :urls ["/" "/about"] :out "dist" :script "/js/main.js"})
 ```
 
 - **Resume.** The server render runs a real session. The browser restores a
@@ -303,7 +303,7 @@ a capacity checklist.
 
 ## Security
 
-The network boundary is inferred, so Curve makes it visible and checks it:
+The network boundary is inferred, so Hypercurve makes it visible and checks it:
 
 - **Taint analysis.** Mark sources with `(def ^:secret api-key ...)`,
   `(let [^:secret t ...])` or a schema key such as
@@ -313,7 +313,7 @@ The network boundary is inferred, so Curve makes it visible and checks it:
   (`(:name user)`), `select-keys` and `dissoc` are tracked precisely; anything
   else taints the whole value.
   `(r/declassify expr "reason")` is the only escape hatch, and it is recorded.
-- **Boundary report.** `(curve.compiler/write-info! "curve-info.edn")` lists
+- **Boundary report.** `(hypercurve.compiler/write-info! "hypercurve-info.edn")` lists
   every value that crosses the network, for code review.
 - **Server-side checks.** The server only accepts values for client-owned
   cells in mounted frames. It only runs closures it handed out.
@@ -325,7 +325,7 @@ The network boundary is inferred, so Curve makes it visible and checks it:
 ## Testing and tooling
 
 ```clojure
-(require '[curve.test :as ct])
+(require '[hypercurve.test :as ct])
 
 (let [p (-> (ct/pair) (ct/mount! App) ct/flush!)]   ; client + server in one JVM, real binary protocol
   (reset! !clicks 1)
@@ -334,16 +334,16 @@ The network boundary is inferred, so Curve makes it visible and checks it:
   (is (= #{[:s->c 1]} (ct/slots-changed p))))
 ```
 
-- **Headless DOM.** `curve.headless` provides `query`, `fire!`, `input!` and
+- **Headless DOM.** `hypercurve.headless` provides `query`, `fire!`, `input!` and
   `html` for UI tests without a browser.
-- **Inspection.** `curve.dev/inspect` returns the live frame tree as data.
-  After `curve.dev/trace!`, `(curve.dev/why frame node)` explains why a value
+- **Inspection.** `hypercurve.dev/inspect` returns the live frame tree as data.
+  After `hypercurve.dev/trace!`, `(hypercurve.dev/why frame node)` explains why a value
   changed.
-- **Replay.** `curve.dev/replay` replays a message log to any point.
-  `curve.dev/log->test` turns a session into a regression test.
-  `curve.dev/wire-stats` shows what uses bandwidth.
+- **Replay.** `hypercurve.dev/replay` replays a message log to any point.
+  `hypercurve.dev/log->test` turns a session into a regression test.
+  `hypercurve.dev/wire-stats` shows what uses bandwidth.
 - **Hot reload.** Edits swap in place, and local state is kept by stable node
-  id. Use `curve.client/run!` with `reload!`, plus the `curve.dev/reload-clj`
+  id. Use `hypercurve.client/run!` with `reload!`, plus the `hypercurve.dev/reload-clj`
   shadow hook.
 - **Linting.** A clj-kondo config ships in `resources/clj-kondo.exports`.
 
@@ -393,7 +393,7 @@ The full design, including trade-offs, is in [docs/design.md](docs/design.md)
 
 ## Limitations
 
-- Pre-1.0: the API can change, and Curve is not published to Clojars yet.
+- Pre-1.0: the API can change, and Hypercurve is not published to Clojars yet.
 - The server is stateful by design: there is no edge or serverless
   deployment. A session needs sticky routing within a node.
 - Hydration re-renders from the snapshot in the same task, instead of
@@ -411,8 +411,8 @@ The full design, including trade-offs, is in [docs/design.md](docs/design.md)
 clojure -M:test                       # JVM test suite (104 tests)
 scripts/ci.sh                         # tests, release builds, bundle budget, perf ratios
 RUN_BROWSER=1 scripts/ci.sh           # + headless-Chrome smoke tests of every example
-clojure -M:bench -m curve.bench       # phase-0 benchmarks
-clojure -M:bench -m curve.jfb         # js-framework-benchmark style ratios
+clojure -M:bench -m hypercurve.bench       # phase-0 benchmarks
+clojure -M:bench -m hypercurve.jfb         # js-framework-benchmark style ratios
 ```
 
 | Example | Shows |
@@ -429,8 +429,11 @@ Docs: [design](docs/design.md) · [milestones and deviations from the design](do
 
 MIT. See [LICENSE](LICENSE).
 
-Curve is a clean-room implementation. It is inspired by the published ideas
+Hypercurve is a clean-room implementation. It is inspired by the published ideas
 of Electric Clojure, React, Svelte, SolidJS, Meteor and Phoenix LiveView,
 but contains no code copied or adapted from Electric Clojure, which is
 licensed under the Business Source License. Contributors must not read
-Electric's source while working on Curve's compiler or runtime.
+Electric's source while working on Hypercurve's compiler or runtime.
+
+Despite the similar prefix, Hypercurve is not affiliated with Hyperfiddle,
+the company behind Electric Clojure.

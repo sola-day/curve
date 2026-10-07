@@ -1,8 +1,8 @@
-# Curve benchmarks
+# Hypercurve benchmarks
 
 Numbers recorded at each milestone. Machine: Apple Silicon laptop, JDK 21,
 `-Dclojure.compiler.direct-linking=true`. Bundle sizes are shadow-cljs
-`release` (advanced compilation), gzip -9. Run: `clojure -M:bench -m curve.bench`.
+`release` (advanced compilation), gzip -9. Run: `clojure -M:bench -m hypercurve.bench`.
 
 ## Phase 0 exit criteria (design §18)
 
@@ -67,7 +67,7 @@ server does not instantiate them (demand-driven, design §8.6 item 8).
 
 ## js-framework-benchmark style ratios (M25)
 
-Curve vs direct manipulation of the same headless DOM tree; CI fails when a
+Hypercurve vs direct manipulation of the same headless DOM tree; CI fails when a
 ratio exceeds 1.5x `bench/baseline.edn`. The direct baseline does only the
 minimal DOM work, so these ratios are the framework's overhead factor.
 
@@ -75,7 +75,7 @@ minimal DOM work, so these ratios are the framework's overhead factor.
 |---|---|
 | create 1000 rows | 26.6 |
 | update every 10th row | 20.1 |
-| select a row (curve.select, O(1)) | 56.2 |
+| select a row (hypercurve.select, O(1)) | 56.2 |
 | swap two rows | 18.6 |
 | clear 1000 rows | 15.9 |
 

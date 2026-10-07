@@ -6,10 +6,10 @@ export default async function (b, check) {
   check('window renders few rows', (await b.evaluate(`${all('.row')}.length`)) < 30);
   const heights = await b.evaluate(`[...new Set(${all('.row')}.map(r => Math.round(r.getBoundingClientRect().height)))].length`);
   check('rows have different heights', heights > 1, `${heights} distinct heights`);
-  await b.evaluate(`${q('.curve-window')}.scrollTop = 2000; ${q('.curve-window')}.dispatchEvent(new Event('scroll'))`);
+  await b.evaluate(`${q('.hypercurve-window')}.scrollTop = 2000; ${q('.hypercurve-window')}.dispatchEvent(new Event('scroll'))`);
   check('scrolling renders later rows', await b.waitFor(`!${all('.row')}.some(r => r.textContent.startsWith('row 0'))`));
   const firstVisibleAligned = await b.evaluate(`(() => {
-    const w = ${q('.curve-window')}.getBoundingClientRect();
+    const w = ${q('.hypercurve-window')}.getBoundingClientRect();
     return ${all('.row')}.some(r => { const x = r.getBoundingClientRect(); return x.top <= w.top + 1 && x.bottom > w.top; });
   })()`);
   check('a row covers the top of the window (spacers match measured heights)', firstVisibleAligned);

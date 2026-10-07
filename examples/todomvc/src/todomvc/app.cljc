@@ -1,7 +1,7 @@
 (ns todomvc.app
   "TodoMVC: all state is client-local; nothing crosses the wire."
   (:require [clojure.string :as str]
-            [curve.core :as r]))
+            [hypercurve.core :as r]))
 
 (defn add-todo [state title]
   (let [t (str/trim title)]

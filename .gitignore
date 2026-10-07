@@ -8,3 +8,4 @@ resources/public/js/
 examples/*/resources/public/js/
 examples/local/resources/public/js/
 examples/showcase/resources/public/js/
+.DS_Store

@@ -1,6 +1,6 @@
 (ns local.app
   "Notes whose 'server' runs in a Web Worker."
-  (:require [curve.core :as r]))
+  (:require [hypercurve.core :as r]))
 
 (defonce !notes (atom []))
 

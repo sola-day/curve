@@ -1,8 +1,8 @@
-# Curve：一个全栈响应式 Clojure Web 框架的技术方案
+# Hypercurve：一个全栈响应式 Clojure Web 框架的技术方案
 
 > 状态：草案 v0.2，2026-10-03（v0.1 增补安全、隔离与部署、测试、调试、协作、local-first、静态站点、路由等章节）
 > 许可证：MIT
-> 原暂定名 "Arc"，2026-10-03 定名为 "Curve"。
+> 原暂定名 "Arc"，2026-10-03 定名为 "Curve"，2026-10-07 改名为 "Hypercurve"。
 >
 > 本方案以 Electric Clojure v3 的设计为出发点，借鉴 React 19、Svelte 5、SolidJS、Meteor 和 Phoenix LiveView，
 > 目标是一个更小、更快、通信更少、支持 SSR、REPL 体验更好的同类框架。
@@ -14,7 +14,7 @@
 
 ### 0.1 Clean-room
 
-Electric v3 采用 Hyperfiddle Business Source License，**Curve 不得复制、改写或翻译 Electric 的源码**。可以借鉴的是公开的设计思想：表达式级网络边界、增量序列、协议的 monoid 结构、结构化并发。所有代码必须独立实现。
+Electric v3 采用 Hyperfiddle Business Source License，**Hypercurve 不得复制、改写或翻译 Electric 的源码**。可以借鉴的是公开的设计思想：表达式级网络边界、增量序列、协议的 monoid 结构、结构化并发。所有代码必须独立实现。
 
 - 可直接依赖的库：Missionary（EPL）、transit、tools.analyzer 等，许可证与 MIT 兼容。
 - 参与核心编译器和运行时编写的人，不应同时逐行阅读 Electric 源码。设计讨论引用 Electric 时只引用其文档、协议说明和公开演讲。
@@ -56,9 +56,9 @@ Electric v3 采用 Hyperfiddle Business Source License，**Curve 不得复制、
 
 ### 非目标（明确不做）
 
-- 无状态 / edge 部署。Curve 是有状态服务端，这是模型本身的选择。
+- 无状态 / edge 部署。Hypercurve 是有状态服务端，这是模型本身的选择。
 - 完整的 Differential Dataflow（任意增量 join / 迭代）。
-- CRDT 与离线同步引擎。Curve 可以**承载**它们（§10），但不实现它们。
+- CRDT 与离线同步引擎。Hypercurve 可以**承载**它们（§10），但不实现它们。
 - 非浏览器客户端。
 - Clojure 以外的宿主语言。
 
@@ -108,7 +108,7 @@ Electric v3 采用 Hyperfiddle Business Source License，**Curve 不得复制、
 ### 3.2 两级语言，减少"函数染色"的困惑
 
 ```clojure
-(ns app.main (:require [curve.core :as r] [curve.dom :as d]))
+(ns app.main (:require [hypercurve.core :as r] [hypercurve.dom :as d]))
 
 ;; 响应式函数。内部任何表达式都是响应式的。
 (r/defn ProductRow [{:keys [id name price] :as p}]     ; 对 incmap 的解构 = 字段级订阅
@@ -210,7 +210,7 @@ Electric v3 采用 Hyperfiddle Business Source License，**Curve 不得复制、
 (r/foreign chart-lib/mount {:data rows :on-select handler})
 ```
 
-Curve 给外部组件一个 DOM 节点和响应式 props，props 变化调用其 update，作用域结束调用其 unmount。图表、富文本编辑器、地图都走这里。对应 LiveView 的 Hooks，但 props 是响应式的，不用手动同步。
+Hypercurve 给外部组件一个 DOM 节点和响应式 props，props 变化调用其 update，作用域结束调用其 unmount。图表、富文本编辑器、地图都走这里。对应 LiveView 的 Hooks，但 props 是响应式的，不用手动同步。
 
 ---
 
@@ -227,7 +227,7 @@ Curve 给外部组件一个 DOM 节点和响应式 props，props 变化调用其
 
 ### 4.2 程序表：产物是数据，不是闭包
 
-Electric 每个节点发射成闭包，产物随节点数线性膨胀（已核实）。Curve 的产物是一张表：
+Electric 每个节点发射成闭包，产物随节点数线性膨胀（已核实）。Hypercurve 的产物是一张表：
 
 ```clojure
 {:nodes [[:lookup 0] [:call fmt-price [3]] [:site :server 4] [:key 0 :price] [:tpl 7 [1 ...]] ...]
@@ -248,7 +248,7 @@ Electric 每个节点发射成闭包，产物随节点数线性膨胀（已核�
 
 ### 4.5 编译期产出的工具信息
 
-编译器额外输出一个 `curve-info.edn`（不进 bundle）：每个表达式的站点、每个跨站点值的位置与类型、路由分块。编辑器插件和 clj-kondo 用它做站点着色和提示；安全审查用它做边界报告（§11.3）。
+编译器额外输出一个 `hypercurve-info.edn`（不进 bundle）：每个表达式的站点、每个跨站点值的位置与类型、路由分块。编辑器插件和 clj-kondo 用它做站点着色和提示；安全审查用它做边界报告（§11.3）。
 
 ### 4.6 动态程序表：编译器作为运行时 API
 
@@ -256,13 +256,13 @@ Electric 每个节点发射成闭包，产物随节点数线性膨胀（已核�
 
 ```clojure
 ;; 服务端，运行时
-(curve.compiler/compile-form '(r/defn Viewer [x] [:pre (pr-str x)]) opts)   ; => 程序表片段
-(curve.session/load! session table-fragment)                                  ; 推给该会话的客户端热加载
+(hypercurve.compiler/compile-form '(r/defn Viewer [x] [:pre (pr-str x)]) opts)   ; => 程序表片段
+(hypercurve.session/load! session table-fragment)                                  ; 推给该会话的客户端热加载
 ```
 
 规则：
 - 走 §10 局部热替换的同一条路：片段带稳定 ID，可以替换或追加节点，不影响已挂载的其他部分。
-- 片段里的**叶子函数**（普通 `fn`）需要在客户端执行代码。两种方式：内建 viewer 函数白名单（零成本，默认）；或可选的 `curve.runtime.sci` 模块用 SCI 解释（约 300 KB gzip，只有选择它的构建才承担，待测）。
+- 片段里的**叶子函数**（普通 `fn`）需要在客户端执行代码。两种方式：内建 viewer 函数白名单（零成本，默认）；或可选的 `hypercurve.runtime.sci` 模块用 SCI 解释（约 300 KB gzip，只有选择它的构建才承担，待测）。
 - 安全：动态片段经过与静态编译相同的站点推断、污点分析和 slot 授权；来自不可信来源的片段只能引用白名单函数，不能启用 SCI。
 - 编译器本身只在服务端存在，客户端体积不变。
 
@@ -300,7 +300,7 @@ Electric 每个节点发射成闭包，产物随节点数线性膨胀（已核�
 
 沿用"四元组皆为 monoid"：`[acks requests changes freezes]`。编码层的变化：
 
-| | Electric（已核实） | Curve |
+| | Electric（已核实） | Hypercurve |
 |---|---|---|
 | 编码 | transit 文本 | 二进制：varint slot id + 类型字节 + 值（transit-msgpack 或 CBOR，待测体积） |
 | 帧 | 文本 websocket | 二进制 websocket，可选 permessage-deflate |
@@ -346,7 +346,7 @@ HTML 按 `suspense` 边界分块：边界外先 flush，边界内数据到达后
 
 `(r/static expr)` 显式把一个服务端表达式标为构建期常量（如从 Markdown 读文档）。
 
-**懒连接**：有服务端节点的页面，SSR 后也不立刻建 websocket，直到页面里首次出现需要服务端的交互或订阅。文档站、营销页、博客因此可以用 Curve，服务端连接数只来自真正交互的用户。
+**懒连接**：有服务端节点的页面，SSR 后也不立刻建 websocket，直到页面里首次出现需要服务端的交互或订阅。文档站、营销页、博客因此可以用 Hypercurve，服务端连接数只来自真正交互的用户。
 
 ### 7.5 无 JS 可用的子集
 
@@ -367,7 +367,7 @@ SSR 输出里表单是真实 `<form>`、链接是真实 `<a>`，`r/mutation` 无
 
 ### 8.2 会话隔离与预算
 
-JVM 没有 BEAM 的进程隔离，Curve 用以下机制逼近：
+JVM 没有 BEAM 的进程隔离，Hypercurve 用以下机制逼近：
 
 | 机制 | 做法 |
 |---|---|
@@ -435,7 +435,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ### 10.1 协作：共享层的直接应用
 
-实时协作需要三样东西，Curve 都从共享层派生，不新增机制：
+实时协作需要三样东西，Hypercurve 都从共享层派生，不新增机制：
 
 ```clojure
 ;; 1. 共享可变状态：服务端权威，所有会话看到同一个响应式值
@@ -448,23 +448,23 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 ```
 
 - 粒度：`incmap` 让多人同时编辑一条记录的不同字段互不覆盖；同一字段的冲突按"服务端最后写入"处理，这对表单、看板、仪表盘足够。
-- 文本级协作（多人同时编辑一段文字）需要 CRDT。**Curve 不实现 CRDT**，但 `shared-atom` 的值可以是 CRDT 文档，更新作为二进制值传输，客户端用 Yjs / Automerge（经 `r/foreign`）合并。Curve 只负责传输和生命周期。
+- 文本级协作（多人同时编辑一段文字）需要 CRDT。**Hypercurve 不实现 CRDT**，但 `shared-atom` 的值可以是 CRDT 文档，更新作为二进制值传输，客户端用 Yjs / Automerge（经 `r/foreign`）合并。Hypercurve 只负责传输和生命周期。
 
 ### 10.2 Local-first 友好度：能承载，不实现
 
-**决定：local-first 是 Curve 之上的一层，Curve 不实现它，只保证不设障碍。** Curve 是服务端权威模型；程序表设计让 local-first 可以作为外部层叠加：
+**决定：local-first 是 Hypercurve 之上的一层，Hypercurve 不实现它，只保证不设障碍。** Hypercurve 是服务端权威模型；程序表设计让 local-first 可以作为外部层叠加：
 
-- **本地服务端站点**：程序表的"server 站点"只是"由哪个求值器执行"。应用可以选择把 server 站点编译进客户端，在 Web Worker 里对本地数据源（SQLite-wasm、IndexedDB）求值，两端进程内直连。此时网络消失，Curve 变成一个纯客户端的响应式框架。
-- **数据同步交给外部引擎**：本地数据源与远端的同步（ElectricSQL、PowerSync、Replicache 等）不是 Curve 的工作；它们只需实现 `Source` 协议，变化就流进 UI。
+- **本地服务端站点**：程序表的"server 站点"只是"由哪个求值器执行"。应用可以选择把 server 站点编译进客户端，在 Web Worker 里对本地数据源（SQLite-wasm、IndexedDB）求值，两端进程内直连。此时网络消失，Hypercurve 变成一个纯客户端的响应式框架。
+- **数据同步交给外部引擎**：本地数据源与远端的同步（ElectricSQL、PowerSync、Replicache 等）不是 Hypercurve 的工作；它们只需实现 `Source` 协议，变化就流进 UI。
 - **边界清楚**：投影层（§9）只覆盖短暂的未确认窗口，不会长成同步引擎。
 
-这是对复杂度预算的遵守：local-first 的难点（冲突、离线队列、schema 迁移）留给专门的工具，Curve 提供的是"本地站点"这一个开关。只有选择它的应用才承担 server 站点进入 bundle 的体积。
+这是对复杂度预算的遵守：local-first 的难点（冲突、离线队列、schema 迁移）留给专门的工具，Hypercurve 提供的是"本地站点"这一个开关。只有选择它的应用才承担 server 站点进入 bundle 的体积。
 
 ---
 
 ## 11. 安全模型
 
-表达式级边界带来新的攻击面：编译器决定什么跨网络，应用作者不一定看得见。Curve 的回答是**让边界可见、可审计，并让服务端对请求有最终裁决权**。
+表达式级边界带来新的攻击面：编译器决定什么跨网络，应用作者不一定看得见。Hypercurve 的回答是**让边界可见、可审计，并让服务端对请求有最终裁决权**。
 
 ### 11.1 威胁模型
 
@@ -481,7 +481,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 1. **服务端权威的 slot 授权**：服务端运行同一张程序表，它知道当前会话**合法挂载**了哪些节点。对未挂载节点的请求一律拒绝。这是协议层的规则，不是应用层的检查，而且零额外成本，因为服务端本来就在维护这张图。
 2. **污点分析**：敏感值在编译期沿图传播；任何把它站到 client 的路径都是**编译错误**，附源码位置。图是显式的，所以这个分析很便宜。粒度规则见 §11.4。
-3. **边界 schema**：跨站点的值和 `r/mutation` 的参数可以用 malli 声明；服务端在入口校验，不合法直接拒绝。可选但推荐，`curve-info.edn` 列出未声明 schema 的边界。
+3. **边界 schema**：跨站点的值和 `r/mutation` 的参数可以用 malli 声明；服务端在入口校验，不合法直接拒绝。可选但推荐，`hypercurve-info.edn` 列出未声明 schema 的边界。
 4. **反序列化白名单**：只接受协议定义的基础类型和 incseq/incmap diff；不接受任意 record、类、符号求值；payload 有大小上限。
 5. **预算与限流**：复用 §8.2 的每会话预算；请求节点的代价由其子图大小估算，超预算拒绝。
 6. **传统防护**：websocket 握手检查 Origin，携带一次性 token；cookie `HttpOnly` + `SameSite`；无 JS 表单 POST 带 CSRF token。
@@ -489,7 +489,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ### 11.3 边界报告
 
-编译器输出"每一个跨网络的值"的清单：源码位置、方向、类型、是否有 schema、是否经过 `^:secret` 附近。它是 `curve-info.edn` 的一部分，可以进 PR 审查、可以 diff。安全审查从"读全部代码"变成"读这份清单"。零运行时成本。
+编译器输出"每一个跨网络的值"的清单：源码位置、方向、类型、是否有 schema、是否经过 `^:secret` 附近。它是 `hypercurve-info.edn` 的一部分，可以进 PR 审查、可以 diff。安全审查从"读全部代码"变成"读这份清单"。零运行时成本。
 
 ### 11.4 污点分析的粒度
 
@@ -527,28 +527,28 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ### 12.1 已核实的问题与规则
 
-| Electric 现状 | Curve 规则 |
+| Electric 现状 | Hypercurve 规则 |
 |---|---|
 | 核心命名空间内联 `rcf` 的 `tests`，连带 `cljs.analyzer` | 运行时命名空间**禁止**引用测试库；测试全部在 `test/` |
-| `runtime3` 直接 `require` `clojure.pprint` | 运行时不引用 pprint；调试输出在 `curve.dev`，受 `goog.DEBUG` 控制，生产构建 DCE |
-| 编译器与运行时同一 jar | 分成 `curve.compiler`（clj）与 `curve.runtime`（cljc）两个 artifact |
+| `runtime3` 直接 `require` `clojure.pprint` | 运行时不引用 pprint；调试输出在 `hypercurve.dev`，受 `goog.DEBUG` 控制，生产构建 DCE |
+| 编译器与运行时同一 jar | 分成 `hypercurve.compiler`（clj）与 `hypercurve.runtime`（cljc）两个 artifact |
 
 ### 12.2 模块与预算（gzip）
 
 | 模块 | 内容 | 预算 | 性质 |
 |---|---|---|---|
-| `curve.runtime.core` | 求值器、incseq/incmap、协议、三态 | 25 KB | 核心 |
-| `curve.runtime.dom` | `Mount` 协议 + DOM 实现、模板克隆、事件、hydration | 12 KB | 核心 |
-| `curve.runtime.router` | 路由 | 3 KB | 核心 |
-| `curve.runtime.optimistic` | 投影层 | 3 KB | 可选 |
-| `curve.runtime.local` | 本地服务端站点（Worker 桥接） | 4 KB | 可选 |
-| `curve.runtime.foreign` | 外部组件挂载（含 diff 感知） | 1.5 KB | 可选 |
-| `curve.runtime.virtual` | `r/window` 超量预取、`r/for :recycle` 行复用 | 3 KB | 可选 |
-| `curve.runtime.canvas` | `Mount` 协议的 canvas 场景图实现 | 3 KB | 可选 |
-| `curve.runtime.dynamic` | 动态程序表片段加载 | 1 KB | 可选 |
-| `curve.runtime.sci` | SCI 解释叶子函数（笔记本、插件） | ~300 KB（待测） | 可选 |
-| `curve.dev` | 检视、回放、追踪 | 0（生产 DCE） | dev |
-| `curve.test` | 无头两端、虚拟时钟、断言 | 0（不进 bundle） | test |
+| `hypercurve.runtime.core` | 求值器、incseq/incmap、协议、三态 | 25 KB | 核心 |
+| `hypercurve.runtime.dom` | `Mount` 协议 + DOM 实现、模板克隆、事件、hydration | 12 KB | 核心 |
+| `hypercurve.runtime.router` | 路由 | 3 KB | 核心 |
+| `hypercurve.runtime.optimistic` | 投影层 | 3 KB | 可选 |
+| `hypercurve.runtime.local` | 本地服务端站点（Worker 桥接） | 4 KB | 可选 |
+| `hypercurve.runtime.foreign` | 外部组件挂载（含 diff 感知） | 1.5 KB | 可选 |
+| `hypercurve.runtime.virtual` | `r/window` 超量预取、`r/for :recycle` 行复用 | 3 KB | 可选 |
+| `hypercurve.runtime.canvas` | `Mount` 协议的 canvas 场景图实现 | 3 KB | 可选 |
+| `hypercurve.runtime.dynamic` | 动态程序表片段加载 | 1 KB | 可选 |
+| `hypercurve.runtime.sci` | SCI 解释叶子函数（笔记本、插件） | ~300 KB（待测） | 可选 |
+| `hypercurve.dev` | 检视、回放、追踪 | 0（生产 DCE） | dev |
+| `hypercurve.test` | 无头两端、虚拟时钟、断言 | 0（不进 bundle） | test |
 
 协作（§10.1）、共享层、快照、SSR 都在服务端，不占客户端体积。CI 对 Hello World 和 TodoMVC 做生产构建并记录体积，超预算即失败。
 
@@ -556,33 +556,33 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ## 13. 可调试性
 
-全部在 `curve.dev`，生产构建零成本；大多数能力是程序表和消息日志的直接读取。
+全部在 `hypercurve.dev`，生产构建零成本；大多数能力是程序表和消息日志的直接读取。
 
 | 能力 | 做法 | 回答的问题 |
 |---|---|---|
-| 实时图检视 | `(curve.dev/inspect session)` 返回图的数据视图，Portal / Reveal 可浏览；每节点显示值、三态、更新时间、最近 diff 大小 | 现在的状态是什么 |
-| "为什么更新" | 每次传播记录触发链，`(curve.dev/why node)` 给出上游变化路径 | 这个值为什么变了 |
+| 实时图检视 | `(hypercurve.dev/inspect session)` 返回图的数据视图，Portal / Reveal 可浏览；每节点显示值、三态、更新时间、最近 diff 大小 | 现在的状态是什么 |
+| "为什么更新" | 每次传播记录触发链，`(hypercurve.dev/why node)` 给出上游变化路径 | 这个值为什么变了 |
 | 时间旅行 | 协议消息是 monoid 日志，开发模式记录后可回放到任意位置 | 刚才发生了什么 |
 | 跨站点栈 | 客户端错误携带触发它的服务端 slot，用两端 source map 拼成一条栈 | 错在哪一端的哪一行 |
 | 线路检视 | 每 slot 的字节数和频率统计 | 什么在占带宽 |
 | 卡住检测 | pending 超过阈值且没有 `suspense` 边界时警告，指出节点位置 | 为什么一直在加载 |
-| 站点着色 | 编辑器读 `curve-info.edn`，服务端表达式与客户端表达式不同底色 | 这段代码在哪跑 |
+| 站点着色 | 编辑器读 `hypercurve-info.edn`，服务端表达式与客户端表达式不同底色 | 这段代码在哪跑 |
 | 编译期诊断 | 站点冲突、不可序列化值跨站点、普通 `fn` 内误用响应式形式、`^:secret` 泄漏，都带源码位置和修复建议 | 为什么编译不过 |
 
 ---
 
 ## 14. 可测试性
 
-全部在 `curve.test`，不进 bundle；核心是复用 SSR 的无头 DOM 和进程内直连。
+全部在 `hypercurve.test`，不进 bundle；核心是复用 SSR 的无头 DOM 和进程内直连。
 
 ### 14.1 单 JVM 双端测试
 
 ```clojure
 (deftest edit-cell
-  (with-curve [app (curve.test/mount App {:source (curve.test/mem-source products)})]
-    (is (= "苹果" (curve.test/text app "tr:first-child td:nth-child(2) input")))
-    (curve.test/input! app "tr:first-child input" "红苹果")
-    (curve.test/flush! app)                                    ; 虚拟时钟推进到稳定
+  (with-hypercurve [app (hypercurve.test/mount App {:source (hypercurve.test/mem-source products)})]
+    (is (= "苹果" (hypercurve.test/text app "tr:first-child td:nth-child(2) input")))
+    (hypercurve.test/input! app "tr:first-child input" "红苹果")
+    (hypercurve.test/flush! app)                                    ; 虚拟时钟推进到稳定
     (is (= "红苹果" (-> products deref first :name)))))
 ```
 
@@ -590,13 +590,13 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 - `mem-source`：内存数据源，实现 `Source` 协议。
 - 虚拟时钟：`sleep`、防抖、超时都确定性可测。
 
-### 14.2 网络断言：Curve 独有
+### 14.2 网络断言：Hypercurve 独有
 
 ```clojure
-(curve.test/with-wire [w app]
-  (curve.test/input! app "..." "x")
-  (is (<= (curve.test/bytes-sent w) 40))                     ; 这次交互传了多少
-  (is (= #{::name} (curve.test/slots-changed w))))           ; 传了哪些 slot
+(hypercurve.test/with-wire [w app]
+  (hypercurve.test/input! app "..." "x")
+  (is (<= (hypercurve.test/bytes-sent w) 40))                     ; 这次交互传了多少
+  (is (= #{::name} (hypercurve.test/slots-changed w))))           ; 传了哪些 slot
 ```
 
 因为边界由编译器决定，**"这个改动是否意外增加了传输"**是真实的回归风险。把它变成可断言的指标。
@@ -615,7 +615,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ## 15. 与各框架的对照
 
-| 能力 | React 19 | Svelte 5 | Solid | Meteor | LiveView | Electric v3 | Curve |
+| 能力 | React 19 | Svelte 5 | Solid | Meteor | LiveView | Electric v3 | Hypercurve |
 |---|---|---|---|---|---|---|---|
 | 边界划分 | 模块级显式 | 文件级显式 | 无 | 文件级显式 | 全服务端 | 表达式级推断 | 表达式级推断 + 元数据糖 |
 | 客户端响应式 | 重渲染 + 编译器 memo | 细粒度 | 细粒度 | Tracker | 无 | 语言级 | 语言级 + 程序表 |
@@ -672,9 +672,9 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 | AG Grid 服务端行模型 | 成熟，但是闭源商业组件，数据层 API 手写 | 框架外解决 |
 | LiveView streams | 服务端拥有滚动状态，每次滚动一个往返且无余量 | 延迟明显；编辑需要 `stream_insert` 手动维护 |
 | Electric v3 | 有 `VirtualScroll`（源码已核实），窗口在服务端，思路相同 | 无列式编码、无余量预取、无行复用 |
-| **Curve** | 窗口 + 余量 + 列式编码 + 共享索引 + 字段级编辑，全部声明式 | 需要验证百万行时服务端排序索引的内存 |
+| **Hypercurve** | 窗口 + 余量 + 列式编码 + 共享索引 + 字段级编辑，全部声明式 | 需要验证百万行时服务端排序索引的内存 |
 
-**Curve 更容易优化的原因**：数据路径从索引到窗口到 DOM 全在一个响应式图里，每一段都可以独立换更快的实现（索引结构、编码、挂载策略）而不改应用代码。React 方案里这几段分属不同库，优化要跨库协调。
+**Hypercurve 更容易优化的原因**：数据路径从索引到窗口到 DOM 全在一个响应式图里，每一段都可以独立换更快的实现（索引结构、编码、挂载策略）而不改应用代码。React 方案里这几段分属不同库，优化要跨库协调。
 
 ### 16.2 Canvas 实时协作（白板、设计工具）
 
@@ -686,17 +686,17 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 | 多人光标与在线 | `r/presence`（§10.1），断开自动移除 |
 | 对象并发修改 | `shared-atom` of `incmap`（每对象一个 map），**按属性 last-writer-wins**。这正是 Figma 公开描述的多人模型（属性级 LWW，非 CRDT；待核实），对白板和设计工具足够 |
 | 提交等待期 | 乐观投影（§9），本地立即生效 |
-| 形状内文本 | 外部 CRDT（Yjs / Automerge）经 `r/foreign`，Curve 只传二进制更新 |
+| 形状内文本 | 外部 CRDT（Yjs / Automerge）经 `r/foreign`，Hypercurve 只传二进制更新 |
 
 **缺口与补充**
 
-1. **渲染目标不是 DOM**。目前挂载器有 DOM 和无头 DOM 两个实现，说明它已经是一个隐含协议。补充：把 `Mount` 协议**显式化**（`insert` / `remove` / `move` / `set-prop` / `set-text`），核心体积不变；`curve.runtime.canvas` 作为可选模块提供保留模式场景图实现，同一份 `r/for` 和 `incmap` diff 直接驱动 canvas 重绘。应用用 hiccup 写 `[:rect {:x x :y y}]`，切换 DOM/SVG/canvas 只换挂载器。
+1. **渲染目标不是 DOM**。目前挂载器有 DOM 和无头 DOM 两个实现，说明它已经是一个隐含协议。补充：把 `Mount` 协议**显式化**（`insert` / `remove` / `move` / `set-prop` / `set-text`），核心体积不变；`hypercurve.runtime.canvas` 作为可选模块提供保留模式场景图实现，同一份 `r/for` 和 `incmap` diff 直接驱动 canvas 重绘。应用用 hiccup 写 `[:rect {:x x :y y}]`，切换 DOM/SVG/canvas 只换挂载器。
 
 2. **高频广播**：N 个用户 60 Hz 光标 = N² 消息/秒。tick 合并已让每 8 ms 只发最新值；补充**每 slot 速率提示**（§6.1）：`^{:rate 20} cursor`，发送端按 20 Hz 取最新值。带宽从每用户每秒 60 × N 降到 20 × N，且不影响正确性。
 
 3. **大量对象的视口裁剪**：万级对象，客户端按视口 `filter` 即可（对象元数据小，一次传完后只收 diff）。十万级以上需要服务端空间索引，由 `Source` 的 bbox 查询提供，不进核心。
 
-4. **撤销/重做**：应用层用 `shared-atom` 的历史栈实现；Curve 的消息日志（§13）可作为开发期的回放工具，不作为撤销机制。
+4. **撤销/重做**：应用层用 `shared-atom` 的历史栈实现；Hypercurve 的消息日志（§13）可作为开发期的回放工具，不作为撤销机制。
 
 **与其他框架对比**
 
@@ -706,9 +706,9 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 | LiveView | 不适合：每次指针移动一个往返 | 必须把整个 canvas 交给 JS Hook，等于放弃 LiveView |
 | Meteor | Minimongo 文档级 LWW + 方法桩，思路相近 | 文档级而非属性级；无 presence 内建；Mongo 绑定 |
 | Electric v3 | 站点模型相同，拖拽本地化同样可行 | 无 presence、无共享层、无 canvas 挂载 |
-| **Curve** | 一套状态（共享 incmap），拖拽本地，LWW 内建，canvas 是挂载器的一个实现 | 文本协作仍需外部 CRDT；速率与裁剪需要应用标注 |
+| **Hypercurve** | 一套状态（共享 incmap），拖拽本地，LWW 内建，canvas 是挂载器的一个实现 | 文本协作仍需外部 CRDT；速率与裁剪需要应用标注 |
 
-**Curve 更容易优化的原因**：表达式级站点让"哪些计算留在本地、哪些同步"是逐表达式的决定，拖拽、吸附、对齐线这类高频计算全部留在客户端不需要任何架构改动；而共享层让同步部分只剩"声明这个值是共享的"。
+**Hypercurve 更容易优化的原因**：表达式级站点让"哪些计算留在本地、哪些同步"是逐表达式的决定，拖拽、吸附、对齐线这类高频计算全部留在客户端不需要任何架构改动；而共享层让同步部分只剩"声明这个值是共享的"。
 
 ### 16.3 数据可视化（仪表盘、流式图表、大序列）
 
@@ -737,7 +737,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 3. **数值编码**：与表格共用 typed array 编码。10 万个 double 作为一个 800 KB 二进制块，不经过 JSON/transit。
 
-4. **大规模渲染**：超过几千个点用 canvas/WebGL，经 `curve.runtime.canvas` 或 `r/foreign`（uPlot、regl）。文档给出阈值建议。
+4. **大规模渲染**：超过几千个点用 canvas/WebGL，经 `hypercurve.runtime.canvas` 或 `r/foreign`（uPlot、regl）。文档给出阈值建议。
 
 **与其他框架对比**
 
@@ -747,33 +747,33 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 | Svelte + d3 / Observable Plot | 客户端渲染很好 | 服务端推送、共享聚合、降采样仍手写 |
 | LiveView + Hooks | `push_event` 把数据推给 JS 图表 | 每个图表一个 Hook，数据形状手动约定；无增量 |
 | Grafana 类 | 成熟但是产品不是框架 | — |
-| **Curve** | 从聚合到编码到图表增量 API 一条响应式管道 | 图表库适配器要逐个写（社区工作） |
+| **Hypercurve** | 从聚合到编码到图表增量 API 一条响应式管道 | 图表库适配器要逐个写（社区工作） |
 
-**Curve 更容易优化的原因**：降采样、共享、编码三件事都发生在数据流图里，改一个桶宽就改变了整个管道的成本，而且对所有会话生效；其他框架里这是三个不同层的三次改动。
+**Hypercurve 更容易优化的原因**：降采样、共享、编码三件事都发生在数据流图里，改一个桶宽就改变了整个管道的成本，而且对所有会话生效；其他框架里这是三个不同层的三次改动。
 
 ### 16.4 计算笔记本（Clerk 类）
 
 **参照**：Clerk（clerk.vision，Nextjournal）。笔记本是普通 `.clj` 文件，在 JVM 上求值，按表单哈希与依赖缓存、只重算改动部分；求值结果转成 presentation 树发给浏览器，大数据结构做省略、展开时按需拉取；浏览器用 React 渲染，自定义 viewer 的 `:render-fn` 由 SCI 解释执行；`::clerk/sync` atom 双向同步；可构建为静态 HTML。（基于截至 2026 年中的了解。）
 
-这个场景和前三个不同：它不是性能压力，而是**UI 在运行时生成**。用它检验 Curve 是否只能服务提前编译好的应用。
+这个场景和前三个不同：它不是性能压力，而是**UI 在运行时生成**。用它检验 Hypercurve 是否只能服务提前编译好的应用。
 
 **已有机制的覆盖**
 
 | 需求 | 机制 |
 |---|---|
-| 服务端求值、结果流到浏览器 | 服务端站点 + 协议，Curve 的主路径 |
+| 服务端求值、结果流到浏览器 | 服务端站点 + 协议，Hypercurve 的主路径 |
 | 只重算改动的单元格 | 稳定节点 ID + 局部热替换（§4.3、§10），同一个机制 |
 | 大结果的省略与按需展开 | `r/window`、incseq 按需订阅；展开 = 挂载子图并请求 slot，比手写 fetch 更自然 |
 | `::clerk/sync` | `shared-atom` |
 | 多人看同一个笔记本 | 共享层 + presence，内建 |
 | 静态发布 | 静态构建（§7.4），客户端交互照常 hydrate |
 | 图表、表格 viewer | `r/foreign`、`virtual`、canvas 模块 |
-| 单 JVM、REPL 驱动 | Curve 的开发模式本就如此；笔记本是开发场景，约束变成优势 |
+| 单 JVM、REPL 驱动 | Hypercurve 的开发模式本就如此；笔记本是开发场景，约束变成优势 |
 
 **缺口与补充**
 
 1. **运行时生成的 viewer**：用户在单元格里写的 hiccup 和 render 函数不是提前编译的。补充 §4.6 动态程序表：服务端在运行时把单元格编译成程序表片段推给客户端热加载；叶子函数走白名单或可选的 SCI 模块。这是本场景唯一需要的新能力，且是通用的。
-2. **边界**：Curve 不是求值层。单元格求值仍是普通 Clojure `eval`，表单依赖分析和结果缓存由笔记本自己做（Clerk 用 tools.analyzer）；Curve 只负责呈现与传输。不把笔记本逻辑塞进响应式图。
+2. **边界**：Hypercurve 不是求值层。单元格求值仍是普通 Clojure `eval`，表单依赖分析和结果缓存由笔记本自己做（Clerk 用 tools.analyzer）；Hypercurve 只负责呈现与传输。不把笔记本逻辑塞进响应式图。
 
 **与其他方案对比**
 
@@ -783,9 +783,9 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 | Jupyter（JSON 消息 + 前端 widgets） | 输出是 MIME bundle，整块替换 | 无增量、无细粒度更新；widgets 另一套状态同步 |
 | Observable（浏览器内响应式） | 求值在浏览器，天然响应式 | 服务端计算要另搭；不是 JVM |
 | Electric v3 | 站点模型相同 | 闭包产物无法运行时生成，只能同样塞 SCI |
-| **Curve** | 程序表运行时生成 + 增量传输 + 共享层 + 静态构建 | 叶子函数仍需 SCI 或白名单；Curve 尚不存在，今天做笔记本应选 Clerk |
+| **Hypercurve** | 程序表运行时生成 + 增量传输 + 共享层 + 静态构建 | 叶子函数仍需 SCI 或白名单；Hypercurve 尚不存在，今天做笔记本应选 Clerk |
 
-**Curve 更适合的原因**：笔记本命中了几乎每一项已有机制，唯一的补充（动态程序表）来自程序表是数据这一基本设计，不是为笔记本单独加的。
+**Hypercurve 更适合的原因**：笔记本命中了几乎每一项已有机制，唯一的补充（动态程序表）来自程序表是数据这一基本设计，不是为笔记本单独加的。
 
 ### 16.5 补充项汇总
 
@@ -795,13 +795,13 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 | 列式编码 + typed array | §6.1，核心协议 | 表格、可视化 | 核心 +2 KB |
 | 每 slot 速率提示 | §6.1，核心协议 | 协作、可视化 | 核心 +0.3 KB |
 | `Mount` 协议显式化；canvas 实现 | §12.2 | 协作、可视化 | 核心 0；可选 +3 KB |
-| `r/window` 余量预取、`r/for :recycle` | §12.2 `curve.runtime.virtual` | 表格 | 可选 +3 KB |
-| diff 感知 foreign、结构共享 `as-vec` | §12.2 `curve.runtime.foreign` | 可视化 | 可选 +0.5 KB |
+| `r/window` 余量预取、`r/for :recycle` | §12.2 `hypercurve.runtime.virtual` | 表格 | 可选 +3 KB |
+| diff 感知 foreign、结构共享 `as-vec` | §12.2 `hypercurve.runtime.foreign` | 可视化 | 可选 +0.5 KB |
 | `bucket-by` 时间分桶聚合 | §5.3，服务端 | 可视化 | 客户端 0 |
 
 核心运行时预算从 40 KB 调整为 43.3 KB；三个性能场景全开时客户端最多再加约 7 KB；笔记本场景若启用 SCI 另加约 300 KB（待测）。
 
-**共同的结论**：前三个场景的瓶颈分别在传输（表格）、频率（协作）、数据量（可视化），Curve 的应对都落在数据流图里的某一段，可以单独替换而不改应用代码。第四个场景（笔记本）检验的是"UI 在运行时生成"，程序表是数据这一设计让它几乎免费。这是"一条响应式管道"相对"多个库拼接"在可优化性上的实际差别。代价是每个场景都需要一两处显式标注（`:rate`、`:recycle`、`bucket-by`），Curve 不替用户猜。
+**共同的结论**：前三个场景的瓶颈分别在传输（表格）、频率（协作）、数据量（可视化），Hypercurve 的应对都落在数据流图里的某一段，可以单独替换而不改应用代码。第四个场景（笔记本）检验的是"UI 在运行时生成"，程序表是数据这一设计让它几乎免费。这是"一条响应式管道"相对"多个库拼接"在可优化性上的实际差别。代价是每个场景都需要一两处显式标注（`:rate`、`:recycle`、`bucket-by`），Hypercurve 不替用户猜。
 
 ---
 
@@ -811,9 +811,9 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 >
 > Octane 说明：不是 Ember Octane。它是 Dominic Gannaway（Inferno 作者、前 React 核心、Svelte 5 贡献者）于 2026 年 6 月开源的新框架，定位"React 的编程模型，编译掉 VDOM"，0.7 beta，MIT。其基准全部为自报，未进入 krausest js-framework-benchmark；本节只借鉴其设计，不引用其性能数字。
 
-### 17.1 调研确认 Curve 已有的方向
+### 17.1 调研确认 Hypercurve 已有的方向
 
-| 技术 | 谁在用 | Curve 对应 |
+| 技术 | 谁在用 | Hypercurve 对应 |
 |---|---|---|
 | 静态 HTML 作为数据字符串，`cloneNode` 一次 | Svelte 5 `from_html`、Octane template IR（源码注释："静态模板是运行时数据，不是 JS 语法"） | §3.4 |
 | 编译到运行时求值，不追求"编译掉一切" | Rich Harris："我们从编译期响应式稍微退回运行时风格……静态分析能做的有限" | §4.2 程序表 |
@@ -852,7 +852,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ### 17.4 编译分析（来自 React Compiler）
 
-**不可变数据让最复杂的部分整套消失。** React Compiler 的 mutable range、aliasing effects（`Assign` / `Alias` / `Capture` / `CreateFrom` / `Mutate*`）、Freeze-on-escape、"作用域延伸到最后一次 mutation"都只因为值创建后还能变。Curve 的节点值创建即最终，memo 边界可以落在任意节点，作用域范围平凡。
+**不可变数据让最复杂的部分整套消失。** React Compiler 的 mutable range、aliasing effects（`Assign` / `Alias` / `Capture` / `CreateFrom` / `Mutate*`）、Freeze-on-escape、"作用域延伸到最后一次 mutation"都只因为值创建后还能变。Hypercurve 的节点值创建即最终，memo 边界可以落在任意节点，作用域范围平凡。
 
 **直接借鉴的：**
 
@@ -860,24 +860,24 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 2. **按节点 bail out**：React 一个函数里有违规就整个放弃优化。程序表可以只把那一个节点标为"不 memo，照常解释"，其余保持优化。严格更好的降级方式。
 3. **效果签名表**：core 库函数（`map`、`assoc`、`swap!`、`reset!`）有签名；本地 `fn` 从函数体推断；未知调用按"不纯、可能修改参数"处理；`js/` 对象、DOM 节点、外部库返回值一律视为可变可别名，只在 interop 边界用悲观假设，其余地方分析保持便宜。
 4. **捕获了可变引用的闭包**：一个捕获了 atom 或 JS 对象的 `fn` 身份稳定但行为不稳定，不能按闭包身份 memo；为每个闭包记录捕获的可变引用。
-5. **依赖比较的选择**：React 用 `Object.is`；Curve 对持久化结构默认用身份比较（结构共享下安全且最便宜），只对已知会重建相等值的生产者用值相等。按边配置，不全局选一种。
-6. **分析结果复用成诊断**：React 1.0 后最大的收益是把编译分析变成 `eslint-plugin-react-hooks` 的规则。Curve 的站点推断、污点分析、效果签名都应作为编辑器诊断输出（经 `curve-info.edn`），而不只是编译错误。
-7. **Flight 风格 wire format**：RSC 的 payload 是 id 索引的行流，`$` 前缀引用（`$n` 引用行、`$@` promise、`$L` 懒加载），同一机制解决去重、循环引用、乱序流式。Curve 的 slot id 天然是行 id；§6.1 的列式编码采用这个形式：shape 表作为一行，记录引用它。
+5. **依赖比较的选择**：React 用 `Object.is`；Hypercurve 对持久化结构默认用身份比较（结构共享下安全且最便宜），只对已知会重建相等值的生产者用值相等。按边配置，不全局选一种。
+6. **分析结果复用成诊断**：React 1.0 后最大的收益是把编译分析变成 `eslint-plugin-react-hooks` 的规则。Hypercurve 的站点推断、污点分析、效果签名都应作为编辑器诊断输出（经 `hypercurve-info.edn`），而不只是编译错误。
+7. **Flight 风格 wire format**：RSC 的 payload 是 id 索引的行流，`$` 前缀引用（`$n` 引用行、`$@` promise、`$L` 懒加载），同一机制解决去重、循环引用、乱序流式。Hypercurve 的 slot id 天然是行 id；§6.1 的列式编码采用这个形式：shape 表作为一行，记录引用它。
 
 **仍然存在的：** `swap!` / `reset!` / I/O 在节点体内是 `Impure` 效果，必须在事件或 effect 语义下执行，不能在纯节点里。编译器对此报错，与 React 的 `set-state-in-render` 规则同类。
 
-**校准预期：** React Compiler 的实测收益是初始加载最多 12%、多数应用 3–5%、少数交互 2.5 倍。自动 memo 的上限就这么高；真正的收益来自细粒度响应式本身。Curve 不应把编译期 memo 当作主要性能来源。
+**校准预期：** React Compiler 的实测收益是初始加载最多 12%、多数应用 3–5%、少数交互 2.5 倍。自动 memo 的上限就这么高；真正的收益来自细粒度响应式本身。Hypercurve 不应把编译期 memo 当作主要性能来源。
 
 ### 17.5 Octane 的两个可借鉴点
 
-1. **`for` 作为独立 opcode，每项 slot 自有状态**：选中态变化只触碰两行（Octane 称"编译器可证明的 O(1) 失效"）。Curve 的 `r/for :by` 本来就是 incseq 驱动，把"每项的局部状态"作为程序表中 `for` 节点的子槽位明确下来，可以保证同样的性质，并让 §16.1 的 `:recycle` 有落点。
-2. **行为根**（`attachBehaviorRoot`）：给服务端 HTML 只挂事件、不接管 DOM。Curve 的静态站点（§7.4）可以多一个档位：纯静态页面 → 行为根（只有事件和少量客户端状态）→ 完整 hydration → 懒连接。每档的客户端成本递增。
+1. **`for` 作为独立 opcode，每项 slot 自有状态**：选中态变化只触碰两行（Octane 称"编译器可证明的 O(1) 失效"）。Hypercurve 的 `r/for :by` 本来就是 incseq 驱动，把"每项的局部状态"作为程序表中 `for` 节点的子槽位明确下来，可以保证同样的性质，并让 §16.1 的 `:recycle` 有落点。
+2. **行为根**（`attachBehaviorRoot`）：给服务端 HTML 只挂事件、不接管 DOM。Hypercurve 的静态站点（§7.4）可以多一个档位：纯静态页面 → 行为根（只有事件和少量客户端状态）→ 完整 hydration → 懒连接。每档的客户端成本递增。
 
 ### 17.6 性能基线进 CI（Octane、Svelte 的实践）
 
 - 性能回归用**比值**（相对 vanilla JS 或上一版本）而不是绝对毫秒做 CI 断言，避免机器差异。
-- 体积基线已有（§12.2）；增加 create-1k / update-10th / select / swap / clear 的 js-framework-benchmark 标准操作，加上 Curve 特有的"1000 行窗口滚动字节数"和"单字段更新字节数"。
-- Svelte 4 → 5 的真实应用数据（应用代码 154 KB → 74 KB）说明模板与运行时的设计改动能带来一半的体积差；Curve 阶段 0 的体积基准应以这个量级为目标，而不是百分之几。
+- 体积基线已有（§12.2）；增加 create-1k / update-10th / select / swap / clear 的 js-framework-benchmark 标准操作，加上 Hypercurve 特有的"1000 行窗口滚动字节数"和"单字段更新字节数"。
+- Svelte 4 → 5 的真实应用数据（应用代码 154 KB → 74 KB）说明模板与运行时的设计改动能带来一半的体积差；Hypercurve 阶段 0 的体积基准应以这个量级为目标，而不是百分之几。
 
 ### 17.7 对现有章节的修订
 
@@ -909,7 +909,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 - §17.2 的模板规则（步骤序列定位、`{start end}` 范围、文本合并、事件委托）与 §17.3 的版本号脏检查，从第一版求值器就采用
 - incseq v1、二进制协议最小子集
 - **会话内存布局**按 §8.6 定下：脏位图 + 拓扑序求值器、共享值 diff 日志 + 游标、编码一次多路分发、每核工作线程；deflate 默认关闭
-- **`curve.test` 最小集**（无头双端 + 虚拟时钟）：从第一行代码开始用它测
+- **`hypercurve.test` 最小集**（无头双端 + 虚拟时钟）：从第一行代码开始用它测
 - **slot 授权规则**进入协议设计，不后补
 - 跑通 TodoMVC 和 SQLite 表格应用；产出体积、字节数、1000 行更新延迟、1000 会话共享一张表的常驻内存的基准
 
@@ -921,10 +921,10 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 - 路由与代码分割、**表单库**（提前到此阶段）、`r/foreign`
 - 完整协议（含 Flight 式行引用的列式编码、typed array、速率提示）、稳定 ID、局部热替换、增量编译
 - memo 成本模型分区、按节点 bail out、效果签名表（§17.4）；`r/defer` 边界（延迟 hydration = 代码分割）
-- `Mount` 协议显式化；`curve.runtime.virtual`（`r/window`、`:recycle`）
+- `Mount` 协议显式化；`hypercurve.runtime.virtual`（`r/window`、`:recycle`）
 - 会话隔离与预算、共享层、数据源协议 + 轮询 + SQLite hook 适配器
 - 污点分析、边界报告、边界 schema、反序列化白名单
-- `curve.dev`：检视、"为什么更新"、编译期诊断；clj-kondo 配置；`curve-info.edn`
+- `hypercurve.dev`：检视、"为什么更新"、编译期诊断；clj-kondo 配置；`hypercurve-info.edn`
 
 ### 阶段 2：SSR 与生产特性（约 3 个月）
 
@@ -933,8 +933,8 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 - 快照、重连、部分续航、排空、版本协商
 - 乐观投影、协作（`shared-atom`、`presence`）、本地服务端站点
 - Datomic 与 Postgres CDC 适配器、指标、优先级通道；跨会话查询合并、空闲会话休眠、可见性降频（§8.6 第 5、6、8 项）
-- `curve.runtime.canvas`、diff 感知 foreign、`bucket-by` 聚合；动态程序表与可选 SCI 模块（§4.6）；四个场景（§16）的示例应用与基准
-- `curve.dev`：时间旅行、跨站点栈、线路检视；`curve.test`：网络断言、日志生成测试
+- `hypercurve.runtime.canvas`、diff 感知 foreign、`bucket-by` 聚合；动态程序表与可选 SCI 模块（§4.6）；四个场景（§16）的示例应用与基准
+- `hypercurve.dev`：时间旅行、跨站点栈、线路检视；`hypercurve.test`：网络断言、日志生成测试
 
 ### 阶段 3：生态（持续）
 
@@ -959,7 +959,7 @@ Meteor 社区"300 连接/机"的经验说明必须从第一天就能量化。
 
 ## 20. 待决问题
 
-1. 名字：Curve 为暂定，需确认无冲突。
+1. 名字：Hypercurve 为暂定，需确认无冲突。
 2. 值编码：transit-msgpack 还是 CBOR，取决于 cljs 侧实现体积（待测）。
 3. 是否支持 Babashka / nbb 作为服务端。
 4. `^:server` / `^:secret` 元数据在 Cursive / clj-kondo 中的提示效果需试验。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Curve CI: tests, release builds, bundle budget, performance ratios,
+# Hypercurve CI: tests, release builds, bundle budget, performance ratios,
 # and (with RUN_BROWSER=1 and Chrome available) real-browser smoke tests.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,7 +19,7 @@ if grep -q 'products-ref\|password_hash' examples/sqlite-table/resources/public/
 fi
 
 echo "== performance ratios (design §17.6)"
-clojure -M:bench -m curve.jfb --check bench/baseline.edn
+clojure -M:bench -m hypercurve.jfb --check bench/baseline.edn
 
 if [ "${RUN_BROWSER:-0}" = "1" ]; then
   echo "== browser smoke tests"

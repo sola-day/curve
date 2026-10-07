@@ -12,7 +12,7 @@ const port = 9300 + Math.floor(Math.random() * 500);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run',
-  `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'curve-'))}`,
+  `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'hypercurve-'))}`,
   'about:blank'], { stdio: 'ignore' });
 
 async function json(path) {
@@ -56,7 +56,7 @@ const check = (name, ok, detail) => { checks.push({ name, ok }); console.log(`${
 try {
   const b = await connect();
   await b.send('Page.navigate', { url });
-  await b.waitFor(`document.documentElement.dataset.curve === 'ready'`, 10000);
+  await b.waitFor(`document.documentElement.dataset.hypercurve === 'ready'`, 10000);
   const steps = process.argv[3] ? (await import(process.argv[3])).default : defaultSteps;
   await steps(b, check);
   if (b.logs.length) console.log('console:', b.logs.join('\n'));
