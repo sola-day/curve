@@ -308,6 +308,14 @@
       hs)
     no-holes))
 
+;; seeded local state (a hot reload or a client restart) goes to the frame
+;; mounted in its place, once: a frame mounted there later starts fresh
+(defn- take-seed! [parent node key]
+  (let [k [(:sid (nth (:nodes (:ctor parent)) node)) key]
+        seed (get-in @(:seed parent) [:kids k])]
+    (when seed (vswap! (:seed parent) update :kids dissoc k))
+    seed))
+
 (defn- new-frame [peer ctor site parent node key]
   (let [n (count (:nodes ctor))
         r (rendered? peer ctor parent node)
@@ -323,9 +331,7 @@
              (deps-of peer ctor)
              env
              (hole-flags peer ctor r env)
-             (volatile! (if parent
-                          (get-in @(:seed parent) [:kids [(:sid (nth (:nodes (:ctor parent)) node)) key]])
-                          @(:root-seed peer))))))
+             (volatile! (if parent (take-seed! parent node key) @(:root-seed peer))))))
 
 (defn- arg-source
   "An arg is fed either from a parent cell [frame i] or a pushed value [:value v]."

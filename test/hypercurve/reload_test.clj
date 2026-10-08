@@ -47,3 +47,24 @@
     (define! "(r/defn Same [] [:p \"same\"])")
     (define! "(r/defn Same [] [:p \"same\"])")
     (is (= (inc before) (compiler/cache-size)) "second identical definition is a cache hit")))
+
+;; a seed carries local state into the remount it was taken for, once: a
+;; child mounted again later (another canvas at the same place) starts fresh
+(define! "(r/defn Shell [] (let [!show (atom true) show (r/watch !show)]
+            [:section [:button.toggle {:on-click (fn [_] (swap! !show not))} \"toggle\"]
+             (when show (Counter))]))")
+
+(deftest seeds-are-used-once
+  (let [{:keys [dom client server] :as p} (render (var-get (resolve 'hypercurve.reload-test/Shell)))
+        plus #(h/query dom "div button")]
+    (dotimes [_ 2] (h/fire! (plus) "click" {}) (ct/flush! p))
+    (define! "(r/defn Shell [] (let [!show (atom true) show (r/watch !show)]
+                [:section [:button.toggle {:on-click (fn [_] (swap! !show not))} \"toggle!\"]
+                 (when show (Counter))]))")
+    (rt/reload! client) (rt/reload! server)
+    (ct/flush! p)
+    (is (= "2" (h/text-content (h/query dom "b"))) "the reload keeps the counter")
+    (h/fire! (h/query dom "button.toggle") "click" {}) (ct/flush! p)
+    (is (nil? (h/query dom "b")))
+    (h/fire! (h/query dom "button.toggle") "click" {}) (ct/flush! p)
+    (is (= "0" (h/text-content (h/query dom "b"))) "mounted again: fresh state")))
