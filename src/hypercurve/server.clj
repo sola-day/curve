@@ -44,7 +44,7 @@
                                                     :hibernate-ms hibernate-ms
                                                     :on-close #(try (ws/close socket) (catch Exception _ nil))})))))
           :on-message (fn [_ msg] (session/receive! @s (buffer->bytes msg)))
-          :on-close (fn [_ _ _] (some-> @s (session/connection-lost! grace-ms)))
+          :on-close (fn [_ code _] (some-> @s (session/socket-closed! code grace-ms)))
           :on-error (fn [_ e] (when on-error (on-error e)) (some-> @s session/close!))}})
       {:status 400 :body "websocket expected"})))
 

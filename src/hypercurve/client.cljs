@@ -100,7 +100,7 @@
                    (when-not @restarted
                      (vreset! restarted true)
                      (vreset! closing true)
-                     (when-let [w @ws] (.close w))
+                     (when-let [w @ws] (.close w 1000))
                      (let [root (root-of @peer-ref)
                            snap (when root (rt/snapshot root))]
                        (when root (rt/unmount-frame! root))
@@ -187,7 +187,7 @@
           (rt/mount-root! peer ctor)
           (vreset! (:root-seed peer) nil)))
     (schedule!)
-    {:peer peer :ws ws :ctor ctor :close! (fn [] (vreset! closing true) (some-> @ws .close))
+    {:peer peer :ws ws :ctor ctor :close! (fn [] (vreset! closing true) (some-> @ws (.close 1000)))
      :opts {:url url :container container :router? false}}))
 
 (defonce ^:private current (atom nil))

@@ -119,6 +119,16 @@
                                         (close! s)))
                (long grace-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))
 
+(defn socket-closed!
+  "The socket closed with a WebSocket close code. The client closing on
+  purpose (1000; 1001 when its page goes away) ends the session now: it
+  will not come back for it, and a session left for the grace period stays
+  visible to others (presence). Anything else may be a dropped connection."
+  [s code grace-ms]
+  (if (contains? #{1000 1001} code)
+    (close! s)
+    (connection-lost! s grace-ms)))
+
 (defn reconnect!
   "A client came back: attach its new connection and resend the frames it
   has not seen. nil when the session is gone (the client starts over)."

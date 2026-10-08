@@ -77,6 +77,21 @@
             (is (= "3" (text c3 ".votes")) "resent and applied exactly once")
             (session/close! (:session c3))))))))
 
+(deftest a-closing-client-ends-its-session
+  (reset! !board {:votes 0})
+  (testing "closed on purpose (1000, 1001): gone at once"
+    (let [c (pump! (client {}))
+          token (:session (first @(:controls c)))]
+      (session/socket-closed! (:session c) 1000 5000)
+      (is (nil? (session/reconnect! token 0 (fn [_]))))))
+  (testing "dropped (1006): kept for the grace period"
+    (let [c (pump! (client {}))
+          token (:session (first @(:controls c)))]
+      (session/socket-closed! (:session c) 1006 5000)
+      (let [s2 (session/reconnect! token 0 (fn [_]))]
+        (is (identical? (:session c) s2))
+        (session/close! s2)))))
+
 (deftest idle-sessions-hibernate-and-wake
   (reset! !board {:votes 0})
   (let [watches #(count (.getWatches ^clojure.lang.IRef !board))
